@@ -94,11 +94,21 @@ const plugin = {
     return chapters;
   },
   async content(chapterId) {
-    const doc = await getDoc("/" + chapterId);
-    const container = doc.querySelector(".reading-content, .chapter-content, .text-left, .reading-area");
-    if (!container) return "";
-    const blocks = container.querySelectorAll("p, blockquote, h2, h3, li");
-    return blocks.map(function(node) { return clean(node.text()); }).filter(Boolean).join("\n\n");
+    const path = chapterId.replace(/^https?:\/\/kolnovel\.com\/?/i, "").replace(/^\/+/, "");
+    const doc = await getDoc("/" + path);
+    const selectors = [
+      ".reading-content",
+      ".chapter-content",
+      ".reading-area",
+      ".text-left"
+    ];
+    for (const selector of selectors) {
+      const container = doc.querySelector(selector);
+      if (!container) continue;
+      const text = container.text();
+      if (text && text.trim()) return text.trim();
+    }
+    return "";
   },
   async tags() {
     return [
