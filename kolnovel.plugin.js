@@ -1,148 +1,111 @@
 // Harbor eBook source for kolnovel.com
+// KolNovel uses /series/ pages and chapter URLs beginning with /shaag.
+
 const BASE = "https://kolnovel.com";
 
 async function getDoc(path) {
-  const res = await harbor.http(BASE + path, { responseType: "text", timeoutMs: 20000 });
+  const res = await harbor.http(BASE + path, {
+    responseType: "text",
+    timeoutMs: 20000,
+  });
   if (!res.ok) throw new Error("HTTP " + res.status + " for " + path);
   return harbor.parseHtml(res.body);
 }
 
 function abs(url) {
   if (!url) return undefined;
-  url = String(url).trim();
-  if (!url) return undefined;
   if (/^https?:\/\//i.test(url)) return url;
-  if (url.indexOf("//") === 0) return "https:" + url;
-  if (url.charAt(0) === "/") return BASE + url;
+  if (url.startsWith("//")) return "https:" + url;
+  if (url.startsWith("/")) return BASE + url;
   return BASE + "/" + url;
 }
 
-function clean(v) { return String(v || "").replace(/\s+/g, " ").trim(); }
-function cleanTitle(v) { return clean(v).replace(/\s+(?:kol|كول)$/iu, "").trim(); }
-function pageNumber(offset) { return Math.floor(Number(offset || 0) / 20) + 1; }
-
-function seriesId(href) {
-  const m = (abs(href) || "").match(/\/series\/([^/?#]+)\/?(?:[?#].*)?$/i);
-  return m ? decodeURIComponent(m[1]) : "";
+function clean(value) {
+  return (value || "").replace(/\s+/g, " ").trim();
 }
 
-function seriesPath(id) { return "/series/" + encodeURIComponent(id) + "/"; }
+function cleanTitle(value) {
+  return clean(value).replace(/\s+(?:kol|كول)$/iu, "").trim();
+}
+
+function pageNumber(offset) {
+  return Math.floor(offset / 20) + 1;
+}
+
+function seriesId(href) {
+  const value = abs(href) || "";
+  const match = value.match(/\/series\/([^/?#]+)\/?(?:[?#].*)?$/i);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+function seriesPath(id) {
+  return "/series/" + encodeURIComponent(id) + "/";
+}
 
 function chapterNumber(text) {
-  const t = clean(text);
-  const m = t.match(/(?:الفصل|فصل|chapter)\s*([0-9]+(?:\.[0-9]+)?)/iu);
+  const value = clean(text);
+  const m = value.match(/(?:الفصل|chapter)\s*([0-9]+(?:\.[0-9]+)?)/iu);
   return m ? m[1] : undefined;
 }
 
-function firstText(doc, selectors) {
-  for (let i = 0; i < selectors.length; i++) {
-    const node = doc.querySelector(selectors[i]);
-    if (node) {
-      const text = clean(node.text());
-      if (text) return text;
-    }
-  }
-  return "";
-}
-
-function imageUrl(node) {
-  if (!node) return undefined;
-  const img = node.querySelector("img") || node;
-  if (!img) return undefined;
-  const attrs = ["data-src", "data-lazy-src", "data-original", "data-image", "data-url", "data-original-src", "src", "data-srcset", "srcset"];
-  for (let i = 0; i < attrs.length; i++) {
-    const value = img.attr(attrs[i]);
-    if (value) return abs(String(value).split(",")[0].trim().split(" ")[0]);
-  }
-  return undefined;
-}
-
-function imageFrom(node) {
-  if (!node) return undefined;
-  const url = imageUrl(node);
-  if (url) return url;
-  const link = node.querySelector("a[href*='/series/']");
-  if (link) return abs(link.attr("data-src") || link.attr("data-image") || link.attr("data-cover") || link.attr("data-thumbnail"));
+function statusFromText(value) {
+  const text = clean(value).toLowerCase();
+  if (text.includes("completed")) return "completed";
+  if (text.includes("hiatus")) return "hiatus";
+  if (text.includes("ongoing")) return "ongoing";
   return undefined;
 }
 
 function cardToSummary(node) {
   const link = node.querySelector("a[href*='/series/']");
   if (!link) return null;
+
   const href = link.attr("href") || "";
   const id = seriesId(href);
   if (!id) return null;
-  const rawTitle = clean(link.attr("title") || firstText(node, ["h2", "h3", "h4"]) || link.text());
-  const title = cleanTitle(rawTitle);
-  if (!title) return null;
-  return { id: id, title: title, cover: imageFrom(node), siteUrl: abs(href), isFanMade: false };
+
+  const rawTitle = clean(
+    link.attr("title") ||
+    node.querySelector("h2")?.text() ||
+    node.querySelector("h3")?.text() ||
+    link.text(),
+  );
+
+  return {
+    id,
+    title: cleanTitle(rawTitle),
+    siteUrl: abs(href),
+    isFanMade: /(?:fan[ -]?fiction|fanfic|فان\s*فيكشن|فانفيك)/iu.test(rawTitle),
+  };
 }
 
 function mapSeriesResults(doc) {
+  const headings = doc.querySelectorAll("h2, h3");
   const results = [];
   const seen = {};
-  const containers = doc.querySelectorAll("article, .page-item-detail, .c-tabs-item__content, .item-summary, .series-item, li");
-  for (let i = 0; i < containers.length; i++) {
-    const item = cardToSummary(containers[i]);
-    if (item && !seen[item.id]) {
-      seen[item.id] = true;
-      results.push(item);
-    }
+
+  for (const heading of headings) {
+    const item = cardToSummary(heading);
+    if (!item || seen[item.id]) continue;
+    seen[item.id] = true;
+    results.push(item);
   }
-  if (!results.length) {
-    const links = doc.querySelectorAll("a[href*='/series/']");
-    for (let i = 0; i < links.length; i++) {
-      const href = links[i].attr("href") || "";
-      const id = seriesId(href);
-      if (!id || seen[id]) continue;
-      const title = cleanTitle(links[i].attr("title") || links[i].text());
-      if (!title) continue;
-      seen[id] = true;
-      results.push({ id: id, title: title, cover: imageFrom(links[i]), siteUrl: abs(href), isFanMade: false });
-    }
-  }
+
   return results;
 }
 
 function browseParams(tagId) {
-  let order = "update", status = "", genre = "";
+  let order = "update";
+  let status = "";
+
   if (tagId === "sort:popular") order = "popular";
   else if (tagId === "sort:rating") order = "rating";
   else if (tagId === "sort:chapters") order = "chapters";
   else if (tagId === "status:ongoing") status = "ongoing";
   else if (tagId === "status:completed") status = "completed";
   else if (tagId === "status:hiatus") status = "hiatus";
-  else if (tagId && tagId.indexOf("genre:") === 0) genre = tagId.slice(6);
-  return { order: order, status: status, genre: genre };
-}
 
-function browsePath(tagId, page) {
-  const p = browseParams(tagId);
-  if (p.genre) return "/genre/" + encodeURIComponent(p.genre) + "/?page=" + page;
-  return "/series/?order=" + encodeURIComponent(p.order) + "&page=" + page + "&status=" + encodeURIComponent(p.status) + "&type=";
-}
-
-function extractChapters(doc) {
-  const chapters = [];
-  const seen = {};
-  const links = doc.querySelectorAll("a[href*='shaag']");
-  for (let i = 0; i < links.length; i++) {
-    const href = String(links[i].attr("href") || "").trim();
-    const title = clean(links[i].text());
-    if (!href || !title) continue;
-    const absolute = abs(href);
-    if (!absolute || !/^https?:\/\/kolnovel\.com\/shaag/i.test(absolute)) continue;
-    const key = absolute.replace(/\/$/, "");
-    if (seen[key]) continue;
-    seen[key] = true;
-    chapters.push({
-      id: key.replace(/^https?:\/\/kolnovel\.com\/?/i, ""),
-      chapter: chapterNumber(title),
-      title: title,
-      position: chapters.length
-    });
-  }
-  return chapters;
+  return { order, status };
 }
 
 const plugin = {
@@ -150,103 +113,120 @@ const plugin = {
   name: "KolNovel",
 
   async popular(offset, tagId) {
-    return mapSeriesResults(await getDoc(browsePath(tagId, pageNumber(offset))));
+    const page = pageNumber(offset);
+    const { order, status } = browseParams(tagId);
+    const path =
+      "/series/?order=" + encodeURIComponent(order) +
+      "&page=" + page +
+      "&status=" + encodeURIComponent(status) +
+      "&type=";
+    return mapSeriesResults(await getDoc(path));
   },
 
   async search(query, offset, tagId) {
-    const p = browseParams(tagId);
-    const path = "/series/?search=" + encodeURIComponent(query) + "&order=" + encodeURIComponent(p.order) + "&page=" + pageNumber(offset) + "&status=" + encodeURIComponent(p.status) + "&type=";
+    const page = pageNumber(offset);
+    const { order, status } = browseParams(tagId);
+    const path =
+      "/series/?search=" + encodeURIComponent(query) +
+      "&order=" + encodeURIComponent(order) +
+      "&page=" + page +
+      "&status=" + encodeURIComponent(status) +
+      "&type=";
     return mapSeriesResults(await getDoc(path));
   },
 
   async detail(id) {
     const doc = await getDoc(seriesPath(id));
-    const title = cleanTitle(firstText(doc, ["h1", ".summary_content h1", ".series-title", ".book-title"]) || id);
+    const title = cleanTitle(doc.querySelector("h1")?.text() || id);
     if (!title) return null;
 
-    const coverNode = doc.querySelector("img.wp-post-image, .series-cover img, .book-cover img, .summary_image img, .summary_image, .series-thumb img");
-    const author = firstText(doc, [".author a", ".author-content a", ".author"]);
-    const yearText = firstText(doc, [".release-year", ".year"]);
-    const year = parseInt(yearText, 10);
-    const body = doc.querySelector("body");
-    const bodyText = body ? clean(body.text()).toLowerCase() : "";
-    let status;
-    if (/completed|مكتملة|مكتمل/.test(bodyText)) status = "completed";
-    else if (/hiatus|متوقفة|متوقف/.test(bodyText)) status = "hiatus";
-    else if (/ongoing|مستمرة|مستمر/.test(bodyText)) status = "ongoing";
+    const cover = doc.querySelector(
+      "img.wp-post-image, .series-cover img, .book-cover img, .summary_image img",
+    );
 
-    const genres = [];
-    const genreLinks = doc.querySelectorAll("a[href*='/genre/']");
-    for (let i = 0; i < genreLinks.length; i++) {
-      const g = clean(genreLinks[i].text());
-      if (g && genres.indexOf(g) < 0) genres.push(g);
+    const author = clean(doc.querySelector(".author a, .author-content a, .author")?.text());
+    const yearText = clean(doc.querySelector(".release-year, .year")?.text());
+    const year = Number.parseInt(yearText, 10);
+
+    const genres = doc
+      .querySelectorAll(".genres a, .genre a, a[href*='/genre/']")
+      .map((node) => clean(node.text()))
+      .filter(Boolean);
+
+    const chapterLinks = doc.querySelectorAll("a[href*='shaag']");
+    let maxChapter;
+    for (const a of chapterLinks) {
+      const n = Number.parseFloat(chapterNumber(a.text()) || "");
+      if (Number.isFinite(n) && (maxChapter === undefined || n > maxChapter)) maxChapter = n;
     }
 
     return {
-      id: id,
-      title: title,
-      altTitle: firstText(doc, [".alternative", ".alt-title", ".series-alternative"]) || undefined,
-      cover: imageUrl(coverNode),
-      description: firstText(doc, [".description", ".summary__content", ".series-description", ".desc", ".summary_content .summary__content"]) || undefined,
-      status: status,
+      id,
+      title,
+      altTitle: clean(doc.querySelector(".alternative, .alt-title, .series-alternative")?.text()) || undefined,
+      cover: abs(cover?.attr("data-src") || cover?.attr("data-lazy-src") || cover?.attr("src")),
+      description: clean(doc.querySelector(".description, .summary, .series-description, .desc")?.text()) || undefined,
+      status: statusFromText(doc.querySelector("body")?.text() || ""),
       author: author || undefined,
-      year: isNaN(year) ? undefined : year,
+      year: Number.isFinite(year) ? year : undefined,
       genres: genres.length ? genres : undefined,
+      chapters: maxChapter !== undefined ? maxChapter : undefined,
       siteUrl: BASE + seriesPath(id),
-      isFanMade: false
+      isFanMade: /(?:fan[ -]?fiction|fanfic|فان\s*فيكشن|فانفيك)/iu.test(title),
     };
   },
 
   async chapters(id) {
     const doc = await getDoc(seriesPath(id));
-    return extractChapters(doc);
+    const links = doc.querySelectorAll("a[href*='shaag']");
+    const chapters = [];
+    const seen = {};
+
+    for (const a of links) {
+      const href = a.attr("href") || "";
+      const absolute = abs(href);
+      const title = clean(a.text());
+
+      if (!absolute || !/^https?:\/\/kolnovel\.com\/shaag/i.test(absolute)) continue;
+      if (!title || seen[absolute]) continue;
+      if (!/(?:الفصل|chapter)\s*[0-9]+/iu.test(title) && !/فصل\s*[0-9]+/iu.test(title)) continue;
+
+      seen[absolute] = true;
+      chapters.push({
+        id: absolute.replace(BASE + "/", "").replace(/\/$/, ""),
+        chapter: chapterNumber(title),
+        title,
+        position: chapters.length,
+      });
+    }
+
+    return chapters;
   },
 
   async content(chapterId) {
-    const path = String(chapterId || "").replace(/^https?:\/\/kolnovel\.com\/?/i, "").replace(/^\/+/, "");
-    if (!path) return "";
-    const doc = await getDoc("/" + path);
-    const containers = doc.querySelectorAll(".reading-content, .chapter-content, .reading-area, .text-left, .entry-content, .entry-content-single");
-    for (let i = 0; i < containers.length; i++) {
-      const paragraphs = containers[i].querySelectorAll("p, blockquote, h2, h3, h4, li");
-      const parts = [];
-      for (let j = 0; j < paragraphs.length; j++) {
-        const text = clean(paragraphs[j].text());
-        if (text) parts.push(text);
-      }
-      if (parts.length) return parts.join("\n\n");
-      const fallback = clean(containers[i].text());
-      if (fallback) return fallback;
-    }
-    return "";
+    const path = "/" + chapterId.replace(/^\/+/, "").replace(/\/$/, "") + "/";
+    const doc = await getDoc(path);
+    const container = doc.querySelector(
+      ".reading-content, .chapter-content, .text-left, .reading-area, .entry-content",
+    );
+    if (!container) return "";
+
+    const blocks = container
+      .querySelectorAll("p, blockquote")
+      .map((node) => clean(node.text()))
+      .filter(Boolean);
+
+    return blocks.length ? blocks.join("\n\n") : clean(container.text());
   },
 
   async tags() {
     return [
-      { id: "genre:romantic", name: "رومانسي", group: "التصنيف" },
-      { id: "genre:رومانسية", name: "رومانسية", group: "التصنيف" },
-      { id: "genre:action", name: "أكشن", group: "التصنيف" },
-      { id: "genre:fantasy", name: "فانتازيا", group: "التصنيف" },
-      { id: "genre:drama", name: "دراما", group: "التصنيف" },
-      { id: "genre:harem", name: "حريم", group: "التصنيف" },
-      { id: "genre:mystery", name: "غموض", group: "التصنيف" },
-      { id: "genre:horror", name: "رعب", group: "التصنيف" },
-      { id: "genre:martial-arts", name: "فنون قتال", group: "التصنيف" },
-      { id: "genre:school-life", name: "حياة مدرسية", group: "التصنيف" },
-      { id: "genre:isekai", name: "إيسيكاي", group: "التصنيف" },
-      { id: "genre:comedy", name: "كوميديا", group: "التصنيف" },
-      { id: "genre:psychological", name: "نفسي", group: "التصنيف" },
-      { id: "genre:reincarnation", name: "تناسخ", group: "التصنيف" },
-      { id: "genre:magic", name: "سحر", group: "التصنيف" },
-      { id: "genre:military", name: "عسكري", group: "التصنيف" },
-      { id: "genre:historical", name: "تاريخي", group: "التصنيف" },
-      { id: "genre:tragedy", name: "مأساة", group: "التصنيف" },
-      { id: "status:ongoing", name: "Ongoing", group: "الحالة" },
-      { id: "status:completed", name: "Completed", group: "الحالة" },
-      { id: "status:hiatus", name: "Hiatus", group: "الحالة" },
-      { id: "sort:popular", name: "الرائجة", group: "الترتيب" },
-      { id: "sort:chapters", name: "الفصول", group: "الترتيب" },
-      { id: "sort:rating", name: "التقييم", group: "الترتيب" }
+      { id: "status:ongoing", name: "Ongoing", group: "Status" },
+      { id: "status:completed", name: "Completed", group: "Status" },
+      { id: "status:hiatus", name: "Hiatus", group: "Status" },
+      { id: "sort:popular", name: "Popular", group: "Sort" },
+      { id: "sort:chapters", name: "Chapters", group: "Sort" },
+      { id: "sort:rating", name: "Rating", group: "Sort" },
     ];
-  }
+  },
 };
