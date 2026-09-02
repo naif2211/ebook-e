@@ -9,6 +9,14 @@
       "lang": "ar",
       "nsfw": false,
       "entry": "kolnovel.plugin.js"
+    },
+    {
+      "id": "kolnovel2",
+      "name": "KolNovel 2",
+      "version": "1.0.0",
+      "lang": "ar",
+      "nsfw": false,
+      "entry": "kolnovel2.plugin.js"
     }
   ]
 }
