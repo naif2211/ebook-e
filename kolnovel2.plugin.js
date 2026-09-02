@@ -56,17 +56,14 @@ function seriesPath(id) {
 
 function chapterNumber(text) {
   const value = clean(text);
-
-  let match = value.match(/(?:الفصل|فصل|chapter|ch\.?)[\s:#-]*(\d+(?:\.\d+)?)/iu);
+  const match = value.match(/(?:الفصل|فصل|chapter|ch\.?)\s*[:#-]?\s*(\d+(?:\.\d+)?)/iu);
   if (match) return match[1];
 
-  match = value.match(/(?:^|\s)(\d+(?:\.\d+)?)(?:\s|$)/);
-  return match ? match[1] : undefined;
+  const fallback = value.match(/(?:^|\s)(\d+(?:\.\d+)?)(?:\s|$)/);
+  return fallback ? fallback[1] : undefined;
 }
 
 function cardFromLink(link) {
-  if (!link) return null;
-
   const href = link.attr("href") || "";
   const id = seriesId(href);
   if (!id) return null;
@@ -74,9 +71,13 @@ function cardFromLink(link) {
   const img = link.querySelector("img");
   const title = clean(
     link.attr("title") ||
+    link.attr("aria-label") ||
     img?.attr("alt") ||
+    img?.attr("title") ||
+    link.querySelector("h1")?.text() ||
     link.querySelector("h2")?.text() ||
     link.querySelector("h3")?.text() ||
+    link.querySelector("h4")?.text() ||
     link.text()
   );
 
@@ -88,6 +89,7 @@ function cardFromLink(link) {
     cover: abs(
       img?.attr("data-src") ||
       img?.attr("data-lazy-src") ||
+      img?.attr("data-original") ||
       img?.attr("src")
     ),
     isFanMade: /(?:fan[ -]?fiction|fanfic|فان\s*فيكشن|فانفيك)/iu.test(title),
@@ -96,21 +98,45 @@ function cardFromLink(link) {
 
 function seriesResults(doc) {
   const results = [];
-  const seen = new Set();
-  const links = doc.querySelectorAll("a[href*='/series/']");
+  const seen = {};
+  const links = doc.querySelectorAll("a[href]");
 
   for (const link of links) {
+    const href = link.attr("href") || "";
+    if (!/\/series\//i.test(href)) continue;
+
     const item = cardFromLink(link);
-    if (!item || seen.has(item.id)) continue;
-    seen.add(item.id);
+    if (!item || seen[item.id]) continue;
+
+    seen[item.id] = true;
     results.push(item);
   }
 
   return results;
 }
 
+async function findSeries(pathList) {
+  for (const path of pathList) {
+    try {
+      const doc = await getDoc(path);
+      const results = seriesResults(doc);
+      if (results.length) return results;
+    } catch (_) {}
+  }
+  return [];
+}
+
 function pageFromOffset(offset) {
   return Math.floor(Number(offset || 0) / PAGE_SIZE) + 1;
+}
+
+function addFilters(params, tagId) {
+  if (tagId === "sort:popular") params.set("order", "popular");
+  if (tagId === "sort:chapters") params.set("order", "chapters");
+  if (tagId === "sort:rating") params.set("order", "rating");
+  if (tagId === "status:ongoing") params.set("status", "ongoing");
+  if (tagId === "status:completed") params.set("status", "completed");
+  if (tagId === "status:hiatus") params.set("status", "hiatus");
 }
 
 const plugin = {
@@ -120,37 +146,32 @@ const plugin = {
   async popular(offset, tagId) {
     const page = pageFromOffset(offset);
     const params = new URLSearchParams();
-
     if (page > 1) params.set("page", String(page));
-
-    if (tagId === "sort:popular") params.set("order", "popular");
-    if (tagId === "sort:chapters") params.set("order", "chapters");
-    if (tagId === "sort:rating") params.set("order", "rating");
-    if (tagId === "status:ongoing") params.set("status", "ongoing");
-    if (tagId === "status:completed") params.set("status", "completed");
-    if (tagId === "status:hiatus") params.set("status", "hiatus");
+    addFilters(params, tagId);
 
     const query = params.toString();
-    const doc = await getDoc("/series/" + (query ? "?" + query : ""));
-    return seriesResults(doc);
+    return findSeries([
+      "/series/" + (query ? "?" + query : ""),
+      "/series/?order=update&page=" + page,
+      "/series/?page=" + page,
+    ]);
   },
 
   async search(query, offset, tagId) {
     const page = pageFromOffset(offset);
+    const encoded = encodeURIComponent(String(query || "").trim());
     const params = new URLSearchParams();
-
-    params.set("search", query);
+    params.set("search", String(query || "").trim());
     if (page > 1) params.set("page", String(page));
+    addFilters(params, tagId);
 
-    if (tagId === "sort:popular") params.set("order", "popular");
-    if (tagId === "sort:chapters") params.set("order", "chapters");
-    if (tagId === "sort:rating") params.set("order", "rating");
-    if (tagId === "status:ongoing") params.set("status", "ongoing");
-    if (tagId === "status:completed") params.set("status", "completed");
-    if (tagId === "status:hiatus") params.set("status", "hiatus");
+    const results = await findSeries([
+      "/series/?" + params.toString(),
+      "/series/?s=" + encoded + "&page=" + page,
+      "/?s=" + encoded + "&page=" + page,
+    ]);
 
-    const doc = await getDoc("/series/?" + params.toString());
-    return seriesResults(doc);
+    return results;
   },
 
   async detail(id) {
@@ -159,6 +180,7 @@ const plugin = {
     const title = clean(
       doc.querySelector("h1")?.text() ||
       doc.querySelector(".entry-title")?.text() ||
+      doc.querySelector("h2")?.text() ||
       id
     );
 
@@ -191,9 +213,9 @@ const plugin = {
 
     let status;
     const bodyText = clean(doc.querySelector("body")?.text() || "");
-    if (/completed|مكتملة|مكتمل/iu.test(bodyText)) status = "completed";
-    else if (/hiatus|متوقفة|متوقف/iu.test(bodyText)) status = "hiatus";
-    else if (/ongoing|مستمرة|مستمر/iu.test(bodyText)) status = "ongoing";
+    if (/\bcompleted\b|مكتملة|مكتمل/iu.test(bodyText)) status = "completed";
+    else if (/\bhiatus\b|متوقفة|متوقف/iu.test(bodyText)) status = "hiatus";
+    else if (/\bongoing\b|مستمرة|مستمر/iu.test(bodyText)) status = "ongoing";
 
     return {
       id,
@@ -206,6 +228,7 @@ const plugin = {
       cover: abs(
         cover?.attr("data-src") ||
         cover?.attr("data-lazy-src") ||
+        cover?.attr("data-original") ||
         cover?.attr("src")
       ),
       description: description || undefined,
@@ -220,60 +243,53 @@ const plugin = {
     const doc = await getDoc(seriesPath(id));
     const links = doc.querySelectorAll("a[href]");
     const chapters = [];
-    const seen = new Set();
+    const seen = {};
 
     for (const link of links) {
       const href = link.attr("href") || "";
-      const absolute = abs(href);
-      const title = clean(link.text());
+      if (!/\/shaag/i.test(href)) continue;
 
-      if (!absolute) continue;
-      if (!/^https?:\/\/kolnovel\.com\/shaag/i.test(absolute)) continue;
-      if (!title) continue;
-      if (seen.has(absolute)) continue;
+      const title = clean(link.text());
+      const absolute = abs(href);
+      if (!absolute || !title) continue;
 
       const number =
         link.attr("data-number") ||
         link.attr("data-chapter") ||
-        chapterNumber(title);
+        chapterNumber(title) ||
+        chapterNumber(href);
 
-      // Keep only actual chapter links. The numeric suffix in the URL is
-      // also accepted because some KolNovel titles don't contain "Chapter".
-      if (!number && !/\/shaag[^/]*-\d+\/?(?:[?#].*)?$/i.test(absolute)) continue;
+      if (!number) continue;
 
-      seen.add(absolute);
+      const chapterId = absolute
+        .replace(/^https?:\/\/[^/]+\//i, "")
+        .replace(/\/$/, "");
+
+      if (!chapterId || seen[chapterId]) continue;
+      seen[chapterId] = true;
 
       chapters.push({
-        id: absolute.replace(/^https?:\/\/kolnovel\.com\//i, "").replace(/\/$/, ""),
+        id: chapterId,
         chapter: number,
-        position: chapters.length,
         title,
+        position: chapters.length,
         volume: link.attr("data-volume") || link.attr("data-vol") || undefined,
         pages: 0,
         language: "ar",
       });
     }
 
-    // KolNovel lists newest chapters first. Reverse by source order, then
-    // use the explicit chapter number when available. No prose is modified.
-    chapters.sort((a, b) => {
-      const na = Number(a.chapter);
-      const nb = Number(b.chapter);
+    chapters.sort((a, b) => Number(a.chapter) - Number(b.chapter));
 
-      if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
-      if (Number.isFinite(na)) return -1;
-      if (Number.isFinite(nb)) return 1;
-      return a.position - b.position;
-    });
+    for (let i = 0; i < chapters.length; i++) {
+      chapters[i].position = i;
+    }
 
-    return chapters.map((item, index) => ({
-      ...item,
-      position: index,
-    }));
+    return chapters;
   },
 
   async content(chapterId) {
-    const path = "/" + String(chapterId).replace(/^\/+/, "").replace(/\/$/, "") + "/";
+    const path = "/" + String(chapterId).replace(/^\/+/, "").replace(/\/+$/, "") + "/";
     const doc = await getDoc(path);
 
     const root =
