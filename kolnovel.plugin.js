@@ -1,13 +1,10 @@
 // Harbor eBook source for kolnovel.com
-// The site uses /series/ for novels and keeps the chapter list on the series page.
+// KolNovel uses /series/ pages and exposes the chapter list on each series page.
 
 const BASE = "https://kolnovel.com";
 
 async function getDoc(path) {
-  const res = await harbor.http(BASE + path, {
-    responseType: "text",
-    timeoutMs: 20000,
-  });
+  const res = await harbor.http(BASE + path, { responseType: "text", timeoutMs: 20000 });
   if (!res.ok) throw new Error("HTTP " + res.status + " for " + path);
   return harbor.parseHtml(res.body);
 }
@@ -25,9 +22,7 @@ function clean(value) {
 }
 
 function cleanTitle(value) {
-  return clean(value)
-    .replace(/\s+(?:kol|كول)$/iu, "")
-    .trim();
+  return clean(value).replace(/\s+(?:kol|كول)$/iu, "").trim();
 }
 
 function pageNumber(offset) {
@@ -52,13 +47,7 @@ function cardToSummary(card) {
   const id = seriesId(href);
   if (!id) return null;
 
-  const rawTitle = clean(
-    link.attr("title") ||
-    card.querySelector("h2")?.text() ||
-    card.querySelector("h3")?.text() ||
-    link.text(),
-  );
-
+  const rawTitle = clean(link.attr("title") || link.text() || card.text());
   const img = card.querySelector("img");
   const ratingText = clean(card.querySelector(".rating, .score")?.text());
   const rating = Number.parseFloat(ratingText.replace(",", "."));
@@ -67,36 +56,35 @@ function cardToSummary(card) {
     id,
     title: cleanTitle(rawTitle),
     cover: abs(img?.attr("data-src") || img?.attr("data-lazy-src") || img?.attr("src")),
-    description: clean(card.querySelector(".summary, .excerpt, p")?.text()),
+    description: clean(card.querySelector(".summary, .excerpt, p")?.text()) || undefined,
     score: Number.isFinite(rating) ? rating : undefined,
     siteUrl: abs(href),
     isFanMade: /(?:fan[ -]?fiction|fanfic|فان\s*فيكشن|فانفيك)/iu.test(rawTitle),
   };
 }
 
-function findSeriesCards(doc) {
-  // The series archive is not the old WP-Manga /manga/ layout.
-  // Prefer headings containing a /series/ link, then fall back to those links themselves.
-  const headings = doc.querySelectorAll("h2, h3");
-  const cards = headings
-    .map((heading) => {
-      const link = heading.querySelector("a[href*='/series/']");
-      return link ? heading : null;
-    })
-    .filter(Boolean);
-
-  if (cards.length) return cards;
-  return doc.querySelectorAll("a[href*='/series/']");
-}
-
 function mapSeriesResults(doc) {
   const results = [];
   const seen = {};
+  const headings = doc.querySelectorAll("h2, h3");
 
-  for (const node of findSeriesCards(doc)) {
-    const card = cardToSummary(node);
+  for (const heading of headings) {
+    const link = heading.querySelector("a[href*='/series/']");
+    if (!link) continue;
+    const card = cardToSummary(heading);
     if (!card || seen[card.id]) continue;
     seen[card.id] = true;
+    results.push(card);
+  }
+
+  if (results.length) return results;
+
+  for (const link of doc.querySelectorAll("a[href*='/series/']")) {
+    const id = seriesId(link.attr("href") || "");
+    if (!id || seen[id]) continue;
+    const card = cardToSummary(link);
+    if (!card) continue;
+    seen[id] = true;
     results.push(card);
   }
 
@@ -118,24 +106,17 @@ function chapterNumber(text) {
 
 function chapterFromLink(a, position) {
   const href = a?.attr("href") || "";
-  if (!href || !/^https?:\/\/kolnovel\.com\//i.test(abs(href))) return null;
-  if (/\/series\//i.test(href)) return null;
+  const absolute = abs(href);
+  if (!absolute || !/^https?:\/\/kolnovel\.com\//i.test(absolute)) return null;
+  if (/\/series\//i.test(absolute)) return null;
 
   const title = clean(a.text());
-  const parent = a.querySelector(".") ? a : a;
-  const publishAt = clean(
-    a.attr("data-date") ||
-    a.querySelector("time")?.attr("datetime") ||
-    a.parentElement?.querySelector?.("time")?.attr("datetime") ||
-    "",
-  );
-
   return {
-    id: abs(href).replace(BASE + "/", "").replace(/\/$/, ""),
+    id: absolute.replace(BASE + "/", "").replace(/\/$/, ""),
     chapter: chapterNumber(title),
     title: title || undefined,
     position,
-    publishAt: publishAt || undefined,
+    publishAt: clean(a.attr("data-date")) || undefined,
   };
 }
 
@@ -172,14 +153,13 @@ const plugin = {
     else if (tagId === "sort:chapters") order = "chapters";
     else if (tagId?.startsWith("status:")) status = tagId.slice(7);
 
-    const path =
+    const doc = await getDoc(
       "/series/?search=" + encodeURIComponent(query) +
       "&order=" + encodeURIComponent(order) +
       "&page=" + page +
       "&status=" + encodeURIComponent(status) +
-      "&type=";
-
-    const doc = await getDoc(path);
+      "&type=",
+    );
     return mapSeriesResults(doc);
   },
 
@@ -191,20 +171,10 @@ const plugin = {
     const cover = doc.querySelector(
       "img.wp-post-image, .series-cover img, .summary_image img, .book-cover img",
     );
-
-    const status = statusFromText(
-      doc.querySelector("body")?.text() || "",
-    );
-
-    const author = clean(
-      doc.querySelector(".author a, .author-content a, .author")?.text(),
-    );
-
-    const yearText = clean(
-      doc.querySelector(".release-year, .year")?.text(),
-    );
+    const status = statusFromText(doc.querySelector("body")?.text() || "");
+    const author = clean(doc.querySelector(".author a, .author-content a, .author")?.text());
+    const yearText = clean(doc.querySelector(".release-year, .year")?.text());
     const year = Number.parseInt(yearText, 10);
-
     const genres = doc
       .querySelectorAll(".genres a, .genre a, a[href*='/genre/']")
       .map((node) => clean(node.text()))
@@ -227,9 +197,6 @@ const plugin = {
 
   async chapters(id) {
     const doc = await getDoc(seriesPath(id));
-
-    // KolNovel exposes the complete chapter list on the series page, including
-    // multiple volume sections. We keep DOM order exactly as supplied by the site.
     const chapterLinks = doc.querySelectorAll(
       ".wp-manga-chapter a, .chapter-list a, .chapters-list a, a[href*='shaag'][href$='/']",
     );
@@ -240,32 +207,33 @@ const plugin = {
     for (const a of chapterLinks) {
       const href = a.attr("href") || "";
       const absolute = abs(href);
-      if (!absolute || !/^https?:\/\/kolnovel\.com\//i.test(absolute)) continue;
-      if (/\/series\//i.test(absolute)) continue;
-      if (seen[absolute]) continue;
-
       const title = clean(a.text());
-      if (!title || !/(?:الفصل|chapter)\s*[0-9]+/iu.test(title)) continue;
+      if (!absolute || !/^https?:\/\/kolnovel\.com\//i.test(absolute)) continue;
+      if (/\/series\//i.test(absolute) || seen[absolute]) continue;
+      if (!/(?:الفصل|chapter)\s*[0-9]+/iu.test(title)) continue;
 
-      seen[absolute] = true;
       const item = chapterFromLink(a, chapters.length);
-      if (item) chapters.push(item);
+      if (item) {
+        seen[absolute] = true;
+        chapters.push(item);
+      }
     }
 
-    // Fallback: the site's chapter links are ordinary links even when the
-    // surrounding class names change. Limit this fallback to chapter-looking URLs/text.
+    // Fallback for the site's chapter links if the surrounding class names change.
     if (!chapters.length) {
-      const all = doc.querySelectorAll("a");
-      for (const a of all) {
+      for (const a of doc.querySelectorAll("a")) {
         const href = a.attr("href") || "";
         const absolute = abs(href);
-        const text = clean(a.text());
+        const title = clean(a.text());
         if (!absolute || !/^https?:\/\/kolnovel\.com\//i.test(absolute)) continue;
         if (/\/series\//i.test(absolute) || seen[absolute]) continue;
-        if (!/(?:الفصل|chapter)\s*[0-9]+/iu.test(text)) continue;
-        seen[absolute] = true;
+        if (!/(?:الفصل|chapter)\s*[0-9]+/iu.test(title)) continue;
+
         const item = chapterFromLink(a, chapters.length);
-        if (item) chapters.push(item);
+        if (item) {
+          seen[absolute] = true;
+          chapters.push(item);
+        }
       }
     }
 
@@ -274,26 +242,17 @@ const plugin = {
 
   async content(chapterId) {
     const doc = await getDoc("/" + chapterId.replace(/^\/+/, "") + "/");
-
-    // The chapter page contains navigation, ads, comments and recommendations.
-    // Prefer the real reading container and preserve its original DOM order.
     const container = doc.querySelector(
       ".reading-content, .chapter-content, .text-left, .reading-area",
     );
-
     if (!container) return "";
 
     const blocks = container.querySelectorAll(
-      ":scope > p, :scope > div, :scope > blockquote, :scope > h2, :scope > h3, :scope > li",
+      "p, blockquote, h2, h3, li",
     );
-
     if (blocks.length) {
-      return blocks
-        .map((node) => clean(node.text()))
-        .filter(Boolean)
-        .join("\n\n");
+      return blocks.map((node) => clean(node.text())).filter(Boolean).join("\n\n");
     }
-
     return clean(container.text());
   },
 
