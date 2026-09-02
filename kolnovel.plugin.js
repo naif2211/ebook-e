@@ -104,40 +104,17 @@ const plugin = {
   async content(chapterId) {
     const path = "/" + chapterId.replace(/^\/+/, "").replace(/\/$/, "") + "/";
     const doc = await getDoc(path);
-    let container = doc.querySelector(".reading-content");
-    if (!container) container = doc.querySelector(".chapter-content");
-    if (!container) container = doc.querySelector(".text-left");
-    if (!container) container = doc.querySelector(".reading-area");
-    if (!container) container = doc.querySelector(".entry-content");
-    if (container) {
-      const text = extractText(container);
-      if (text) return text;
-    }
-    const article = doc.querySelector("article");
-    if (article) {
-      const text = extractText(article);
-      if (text) return text;
-    }
-    const main = doc.querySelector("main");
-    if (main) {
-      const text = extractText(main);
-      if (text) return text;
-    }
-    return "";
+    const container = doc.querySelector(".reading-content, .chapter-content, .text-left, .reading-area");
+    if (!container) return "";
+    const blocks = container.querySelectorAll("p, blockquote, h2, h3, li").map(function(n) { return clean(n.text()); }).filter(Boolean);
+    return blocks.length ? blocks.join("\n\n") : clean(container.text());
   },
   async tags() {
     return [
-      { id: "genre:رومانسية", name: "رومانسية", group: "التصنيف" }, { id: "genre:romantic", name: "رومانسي", group: "التصنيف" },
-      { id: "genre:action", name: "أكشن", group: "التصنيف" }, { id: "genre:fantasy", name: "فانتازيا", group: "التصنيف" },
-      { id: "genre:drama", name: "دراما", group: "التصنيف" }, { id: "genre:harem", name: "حريم", group: "التصنيف" },
-      { id: "genre:mystery", name: "غموض", group: "التصنيف" }, { id: "genre:horror", name: "رعب", group: "التصنيف" },
-      { id: "genre:martial-arts", name: "فنون قتال", group: "التصنيف" }, { id: "genre:school-life", name: "حياة مدرسية", group: "التصنيف" },
-      { id: "genre:isekai", name: "إيسيكاي", group: "التصنيف" }, { id: "genre:comedy", name: "كوميديا", group: "التصنيف" },
-      { id: "genre:psychological", name: "نفسي", group: "التصنيف" }, { id: "genre:reincarnation", name: "تناسخ", group: "التصنيف" },
-      { id: "genre:magic", name: "سحر", group: "التصنيف" }, { id: "genre:military", name: "عسكري", group: "التصنيف" },
-      { id: "genre:historical", name: "تاريخي", group: "التصنيف" }, { id: "genre:tragedy", name: "مأساة", group: "التصنيف" },
-      { id: "status:ongoing", name: "Ongoing", group: "الحالة" }, { id: "status:completed", name: "Completed", group: "الحالة" },
-      { id: "status:hiatus", name: "Hiatus", group: "الحالة" }, { id: "sort:popular", name: "الرائجة", group: "الترتيب" },
+      { id: "status:ongoing", name: "Ongoing", group: "الحالة" },
+      { id: "status:completed", name: "Completed", group: "الحالة" },
+      { id: "status:hiatus", name: "Hiatus", group: "الحالة" },
+      { id: "sort:popular", name: "الرائجة", group: "الترتيب" },
       { id: "sort:rating", name: "التقييم", group: "الترتيب" }
     ];
   }
