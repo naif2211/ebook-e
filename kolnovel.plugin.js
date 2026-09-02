@@ -65,11 +65,6 @@ function browsePath(tagId, page) {
   if (p.genre) return "/genre/" + encodeURIComponent(p.genre) + "/?page=" + page;
   return "/series/?order=" + encodeURIComponent(p.order) + "&page=" + page + "&status=" + encodeURIComponent(p.status) + "&type=";
 }
-function extractText(container) {
-  if (!container) return "";
-  const blocks = container.querySelectorAll("p, blockquote, h2, h3").map(function(n) { return clean(n.text()); }).filter(Boolean);
-  return blocks.length ? blocks.join("\n\n") : clean(container.text());
-}
 const plugin = {
   id: "kolnovel", name: "KolNovel",
   async popular(offset, tagId) { return mapSeriesResults(await getDoc(browsePath(tagId, pageNumber(offset)))); },
@@ -82,10 +77,7 @@ const plugin = {
     const title = cleanTitle(doc.querySelector("h1")?.text() || id);
     if (!title) return null;
     const cover = doc.querySelector("img.wp-post-image, .series-cover img, .book-cover img, .summary_image img, article img");
-    const genres = doc.querySelectorAll("a[href*='/genre/']").map(function(n) { return clean(n.text()); }).filter(Boolean);
-    let maxChapter;
-    for (const a of doc.querySelectorAll("a[href*='shaag']")) { const n = Number.parseFloat(chapterNumber(a.text()) || ""); if (Number.isFinite(n) && (maxChapter === undefined || n > maxChapter)) maxChapter = n; }
-    return { id, title, altTitle: clean(doc.querySelector(".alternative, .alt-title, .series-alternative")?.text()) || undefined, cover: abs(cover?.attr("data-src") || cover?.attr("data-lazy-src") || cover?.attr("data-original") || cover?.attr("src")), description: clean(doc.querySelector(".description, .summary, .series-description, .desc")?.text()) || undefined, author: clean(doc.querySelector(".author a, .author-content a, .author")?.text()) || undefined, genres: genres.length ? genres : undefined, chapters: maxChapter !== undefined ? maxChapter : undefined, siteUrl: BASE + seriesPath(id), isFanMade: false };
+    return { id, title, cover: abs(cover?.attr("data-src") || cover?.attr("data-lazy-src") || cover?.attr("data-original") || cover?.attr("src")), description: clean(doc.querySelector(".description, .summary, .series-description, .desc")?.text()) || undefined, siteUrl: BASE + seriesPath(id), isFanMade: false };
   },
   async chapters(id) {
     const doc = await getDoc(seriesPath(id));
@@ -102,12 +94,11 @@ const plugin = {
     return chapters;
   },
   async content(chapterId) {
-    const path = "/" + chapterId.replace(/^\/+/, "").replace(/\/$/, "") + "/";
-    const doc = await getDoc(path);
+    const doc = await getDoc("/" + chapterId);
     const container = doc.querySelector(".reading-content, .chapter-content, .text-left, .reading-area");
     if (!container) return "";
-    const blocks = container.querySelectorAll("p, blockquote, h2, h3, li").map(function(n) { return clean(n.text()); }).filter(Boolean);
-    return blocks.length ? blocks.join("\n\n") : clean(container.text());
+    const blocks = container.querySelectorAll("p, blockquote, h2, h3, li");
+    return blocks.map(function(node) { return clean(node.text()); }).filter(Boolean).join("\n\n");
   },
   async tags() {
     return [
