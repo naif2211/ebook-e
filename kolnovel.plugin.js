@@ -96,17 +96,17 @@ const plugin = {
   async content(chapterId) {
     const path = chapterId.replace(/^https?:\/\/kolnovel\.com\/?/i, "").replace(/^\/+/, "");
     const doc = await getDoc("/" + path);
-    const selectors = [
-      ".reading-content",
-      ".chapter-content",
-      ".reading-area",
-      ".text-left"
-    ];
-    for (const selector of selectors) {
-      const container = doc.querySelector(selector);
-      if (!container) continue;
-      const text = container.text();
-      if (text && text.trim()) return text.trim();
+    const containers = doc.querySelectorAll(".reading-content, .chapter-content, .reading-area, .text-left, .entry-content, .entry-content-single");
+    for (const container of containers) {
+      const paragraphs = container.querySelectorAll("p, blockquote, h2, h3, h4, li");
+      const parts = [];
+      for (const node of paragraphs) {
+        const text = clean(node.text());
+        if (text) parts.push(text);
+      }
+      if (parts.length) return parts.join("\n\n");
+      const fallback = clean(container.text());
+      if (fallback) return fallback;
     }
     return "";
   },
