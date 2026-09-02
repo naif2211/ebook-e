@@ -1,0 +1,14 @@
+{
+  "type": "ebook",
+  "name": "KolNovel Repository",
+  "plugins": [
+    {
+      "id": "kolnovel",
+      "name": "KolNovel",
+      "version": "1.0.0",
+      "lang": "ar",
+      "nsfw": false,
+      "entry": "kolnovel.plugin.js"
+    }
+  ]
+}
