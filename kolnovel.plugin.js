@@ -65,6 +65,11 @@ function browsePath(tagId, page) {
   if (p.genre) return "/genre/" + encodeURIComponent(p.genre) + "/?page=" + page;
   return "/series/?order=" + encodeURIComponent(p.order) + "&page=" + page + "&status=" + encodeURIComponent(p.status) + "&type=";
 }
+function extractText(container) {
+  if (!container) return "";
+  const blocks = container.querySelectorAll("p, blockquote, h2, h3").map(function(n) { return clean(n.text()); }).filter(Boolean);
+  return blocks.length ? blocks.join("\n\n") : clean(container.text());
+}
 const plugin = {
   id: "kolnovel", name: "KolNovel",
   async popular(offset, tagId) { return mapSeriesResults(await getDoc(browsePath(tagId, pageNumber(offset)))); },
@@ -91,8 +96,6 @@ const plugin = {
       const absolute = abs(href);
       const title = clean(a.text());
       if (!absolute || !/^https?:\/\/kolnovel\.com\/shaag/i.test(absolute) || !title || seen[absolute]) continue;
-      // Accept every real KolNovel chapter URL. Do not filter by chapter text,
-      // because some series use special labels (END, مقدمة, prologue, etc.).
       seen[absolute] = true;
       chapters.push({ id: absolute.replace(BASE + "/", "").replace(/\/$/, ""), chapter: chapterNumber(title), title: title, position: chapters.length });
     }
@@ -101,10 +104,26 @@ const plugin = {
   async content(chapterId) {
     const path = "/" + chapterId.replace(/^\/+/, "").replace(/\/$/, "") + "/";
     const doc = await getDoc(path);
-    const container = doc.querySelector(".reading-content, .chapter-content, .text-left, .reading-area, .entry-content");
-    if (!container) return "";
-    const blocks = container.querySelectorAll("p, blockquote").map(function(n) { return clean(n.text()); }).filter(Boolean);
-    return blocks.length ? blocks.join("\n\n") : clean(container.text());
+    let container = doc.querySelector(".reading-content");
+    if (!container) container = doc.querySelector(".chapter-content");
+    if (!container) container = doc.querySelector(".text-left");
+    if (!container) container = doc.querySelector(".reading-area");
+    if (!container) container = doc.querySelector(".entry-content");
+    if (container) {
+      const text = extractText(container);
+      if (text) return text;
+    }
+    const article = doc.querySelector("article");
+    if (article) {
+      const text = extractText(article);
+      if (text) return text;
+    }
+    const main = doc.querySelector("main");
+    if (main) {
+      const text = extractText(main);
+      if (text) return text;
+    }
+    return "";
   },
   async tags() {
     return [
