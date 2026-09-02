@@ -10,6 +10,7 @@ async function getDoc(path) {
 function abs(url) {
   if (!url) return undefined;
   const v = String(url).trim();
+  if (!v) return undefined;
   if (/^https?:\/\//i.test(v)) return v;
   if (v.startsWith("//")) return "https:" + v;
   return v.startsWith("/") ? BASE + v : BASE + "/" + v;
@@ -19,7 +20,8 @@ function clean(v) { return String(v || "").replace(/\u00a0/g, " ").replace(/\s+/
 function pageNumber(offset) { return Math.floor(Number(offset || 0) / 20) + 1; }
 function seriesId(href) {
   const m = (abs(href) || "").match(/\/series\/([^/?#]+)\/?(?:[?#].*)?$/i);
-  return m ? decodeURIComponent(m[1]) : "";
+  if (!m) return "";
+  try { return decodeURIComponent(m[1]); } catch (_) { return m[1]; }
 }
 function seriesPath(id) { return "/series/" + encodeURIComponent(id) + "/"; }
 
@@ -39,8 +41,18 @@ function chapterNumberFromUrl(url) {
   return undefined;
 }
 
-function chapterId(url) { return abs(url) || ""; }
-function isChapterUrl(url) { return /https?:\/\/kolnovel\.com\/shaag/i.test(abs(url) || ""); }
+function chapterId(url) {
+  const absolute = abs(url);
+  if (!absolute) return "";
+  // Harbor chapter IDs are kept as site-relative paths. This is important:
+  // the reader passes the ID back to content(), which then resolves it with BASE.
+  return absolute.replace(/^https?:\/\/kolnovel\.com/i, "").replace(/^\/+/, "/");
+}
+
+function isChapterUrl(url) {
+  const absolute = abs(url) || "";
+  return /^https?:\/\/kolnovel\.com\/shaag[^/?#]*(?:[/?#]|$)/i.test(absolute);
+}
 
 function card(link) {
   const href = link.attr("href") || "";
@@ -49,7 +61,12 @@ function card(link) {
   const img = link.querySelector("img");
   const title = clean(link.attr("title") || img?.attr("alt") || img?.attr("title") || link.text());
   if (!title) return null;
-  return { id, title: title.replace(/\s+(?:kol|كول)$/iu, "").trim(), cover: abs(img?.attr("data-src") || img?.attr("data-lazy-src") || img?.attr("src")), siteUrl: abs(href) };
+  return {
+    id,
+    title: title.replace(/\s+(?:kol|كول)$/iu, "").trim(),
+    cover: abs(img?.attr("data-src") || img?.attr("data-lazy-src") || img?.attr("src")),
+    siteUrl: abs(href)
+  };
 }
 
 function mapSeriesResults(doc) {
@@ -65,30 +82,34 @@ function mapSeriesResults(doc) {
 }
 
 function extractChapters(doc) {
-  // Do not require the visible text to contain "Chapter"; KolNovel may use only a number/title.
   const links = doc.querySelectorAll("a[href]");
   const out = [], seen = {};
+
   for (const a of links) {
     const href = a.attr("href") || "";
-    if (!isChapterUrl(href)) continue;
     const absolute = abs(href);
-    if (!absolute || seen[absolute]) continue;
+    if (!absolute || !isChapterUrl(absolute)) continue;
+
+    const id = chapterId(absolute);
+    if (!id || seen[id]) continue;
+
     const title = clean(a.text()) || clean(a.attr("title")) || clean(a.attr("aria-label"));
     const number = chapterNumber(title) || chapterNumberFromUrl(absolute);
-    // Keep the link even when its label has no parsable number.
-    seen[absolute] = true;
+
+    seen[id] = true;
     out.push({
-      id: chapterId(absolute),
+      id,
       chapter: number || String(out.length + 1),
-      title: title || "Chapter " + (number || String(out.length + 1)),
+      title: title || "الفصل " + (number || String(out.length + 1)),
       position: out.length,
       pages: 0,
       language: "ar"
     });
   }
+
   out.sort((a, b) => {
     const an = Number(a.chapter), bn = Number(b.chapter);
-    if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
+    if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn;
     return a.position - b.position;
   });
   for (let i = 0; i < out.length; i++) out[i].position = i;
@@ -145,12 +166,12 @@ const plugin = {
     const doc = await getDoc(seriesPath(id));
     const title = clean(doc.querySelector("h1")?.text() || id);
     const cover = doc.querySelector("img.wp-post-image, .series-cover img, .book-cover img, .summary_image img, img[data-src], img[src]");
-    const chapters = extractChapters(doc);
     return {
-      id, title,
+      id,
+      title,
       cover: abs(cover?.attr("data-src") || cover?.attr("data-lazy-src") || cover?.attr("src")),
       description: clean(doc.querySelector(".description, .summary, .series-description, .desc")?.text()) || undefined,
-      chapters: chapters.length ? Number(chapters[chapters.length - 1].chapter) : undefined,
+      chapters: extractChapters(doc).length,
       siteUrl: BASE + seriesPath(id)
     };
   },
@@ -162,9 +183,7 @@ const plugin = {
   async content(chapterId) {
     const doc = await getDoc(chapterId);
     const root = findContent(doc);
-    const text = extractText(root);
-    if (text) return text;
-    return extractText(doc);
+    return extractText(root) || extractText(doc);
   },
 
   async tags() {
