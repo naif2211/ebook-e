@@ -57,14 +57,9 @@ function cardFromLink(a) {
   const id = novelId(href);
   if (!id) return null;
 
-  const parent =
-    a.parentElement ||
-    a.querySelector("..");
-
-  const img = a.querySelector("img") || (parent && parent.querySelector("img"));
   const title = clean(
     a.attr("title") ||
-    img?.attr("alt") ||
+    a.querySelector("img")?.attr("alt") ||
     a.text()
   );
 
@@ -112,10 +107,10 @@ const plugin = {
   async search(query, offset, tagId) {
     const page = Math.floor(Number(offset || 0) / 24) + 1;
     const params = new URLSearchParams();
-    params.set("search", query);
+    params.set("s", query);
     if (page > 1) params.set("page", String(page));
     if (tagId && tagId.indexOf("genre:") === 0) params.set("genre", tagId.slice(6));
-    return extractNovels(await getDoc("/library?" + params.toString()));
+    return extractNovels(await getDoc("/?" + params.toString()));
   },
 
   async detail(id) {
@@ -160,17 +155,23 @@ const plugin = {
     for (const a of links) {
       const href = a.attr("href") || "";
       const path = chapterPath(href);
-
       const m = path.match(/^novel\/([^/]+)\/(\d+)\/?$/i);
-      if (!m || decodeURIComponent(m[1]) !== id) continue;
+      if (!m) continue;
 
-      const title = clean(a.text());
-      if (!title) continue;
+      let seriesId = "";
+      try {
+        seriesId = decodeURIComponent(m[1]);
+      } catch (_) {
+        seriesId = m[1];
+      }
+      if (seriesId !== id) continue;
 
-      const number = m[2] || a.attr("data-number") || chapterNumber(title);
       const key = path.replace(/\/$/, "");
       if (seen[key]) continue;
       seen[key] = true;
+
+      const number = m[2];
+      const title = clean(a.text()) || ("الفصل " + number);
 
       chapters.push({
         id: key,
@@ -182,16 +183,15 @@ const plugin = {
       });
     }
 
-    chapters.sort((a, b) => {
-      const na = Number(a.chapter);
-      const nb = Number(b.chapter);
-      if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
-      return a.position - b.position;
-    });
+    chapters.sort((a, b) => Number(a.chapter) - Number(b.chapter));
 
     return chapters.map((c, i) => ({
-      ...c,
-      position: i
+      id: c.id,
+      chapter: c.chapter,
+      title: c.title,
+      position: i,
+      pages: c.pages,
+      language: c.language
     }));
   },
 
