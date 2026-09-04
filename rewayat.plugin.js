@@ -1,10 +1,11 @@
 // Rewayat.club - Harbor eBook Source
 const BASE = "https://rewayat.club";
-const CHAPTERS_PER_PAGE = 24;
+const API = "https://api.rewayat.club";
 
 async function getDoc(path) {
-  const res = await harbor.http(BASE + (path.startsWith("/") ? path : "/" + path), { responseType: "text", timeoutMs: 20000 });
-  if (!res.ok) throw new Error("http " + res.status + " for " + path);
+  const url = /^https?:\/\//i.test(path) ? path : BASE + (path.startsWith("/") ? path : "/" + path);
+  const res = await harbor.http(url, { responseType: "text", timeoutMs: 20000 });
+  if (!res.ok) throw new Error("HTTP " + res.status + " for " + url);
   return harbor.parseHtml(res.body);
 }
 
@@ -44,62 +45,89 @@ function chapterInfo(href) {
   return { path: path.replace(/\/$/, ""), seriesId, number: m[2] };
 }
 
-function imageUrl(img) {
-  if (!img) return undefined;
-  return abs(
-    img.attr("data-src") ||
-    img.attr("data-lazy-src") ||
-    img.attr("data-original") ||
-    img.attr("data-image") ||
-    img.attr("src")
-  );
+function nuxt(doc) {
+  const scripts = doc.querySelectorAll("script");
+  for (let i = 0; i < scripts.length; i++) {
+    const text = scripts[i].text() || "";
+    const marker = "window.__NUXT__=";
+    const p = text.indexOf(marker);
+    if (p < 0) continue;
+    let raw = text.slice(p + marker.length).trim();
+    if (raw.endsWith(";")) raw = raw.slice(0, -1);
+    try { return JSON.parse(raw); } catch (_) {}
+  }
+  return null;
+}
+
+function apiCover(poster) {
+  if (!poster) return undefined;
+  const s = String(poster).trim();
+  if (!s) return undefined;
+  if (/^https?:\/\//i.test(s)) return s;
+  return API + (s.startsWith("/") ? s : "/" + s);
+}
+
+function uniquePush(arr, seen, item) {
+  if (!item || seen[item.id]) return;
+  seen[item.id] = true;
+  arr.push(item);
 }
 
 function cardFromLink(a) {
   const id = novelId(a.attr("href") || "");
   if (!id) return null;
-  const img = a.querySelector("img[src], img[data-src], img[data-lazy-src], img[data-original]");
+  const img = a.querySelector("img");
   const title = clean(a.attr("title") || img?.attr("alt") || a.text());
   if (!title) return null;
-  return { id, title, cover: imageUrl(img) };
+  return {
+    id,
+    title,
+    cover: abs(img?.attr("data-src") || img?.attr("data-lazy-src") || img?.attr("src"))
+  };
 }
 
 function extractNovels(doc) {
   const out = [];
   const seen = {};
   doc.querySelectorAll("a[href]").map((a) => {
-    const item = cardFromLink(a);
-    if (item && !seen[item.id]) {
-      seen[item.id] = true;
-      out.push(item);
-    }
+    uniquePush(out, seen, cardFromLink(a));
     return null;
   });
   return out;
 }
 
-function chapterCount(doc) {
-  const text = clean(doc.text());
-  const m = text.match(/الفصول\s*\(\s*(\d+)\s*\)/);
-  return m ? Number(m[1]) : 0;
-}
-
-function addChaptersFromDoc(doc, id, chapters, seen) {
+function extractChapterLinks(doc, id, chapters, seen) {
   doc.querySelectorAll("a[href]").map((a) => {
     const info = chapterInfo(a.attr("href") || "");
     if (!info || info.seriesId !== id || seen[info.path]) return null;
-
     seen[info.path] = true;
     chapters.push({
       id: info.path,
       chapter: info.number,
-      title: clean(a.text()) || ("الفصل " + info.number),
-      position: chapters.length,
-      pages: 0,
-      language: "ar"
+      title: clean(a.text()) || ("الفصل " + info.number)
     });
     return null;
   });
+}
+
+function chaptersFromNuxt(data, id, chapters, seen) {
+  try {
+    const fetch0 = data && data.fetch && data.fetch[0];
+    const list = fetch0 && fetch0.chapters;
+    if (!list || !list.map) return 0;
+    list.map((item) => {
+      const number = String(item.number);
+      const key = "novel/" + id + "/" + number;
+      if (!seen[key]) {
+        seen[key] = true;
+        chapters.push({ id: key, chapter: number, title: clean(item.title) || ("الفصل " + number) });
+      }
+      return null;
+    });
+    return list.length;
+  } catch (_) {
+    return 0;
+  }
 }
 
 const plugin = {
@@ -118,56 +146,64 @@ const plugin = {
 
   async detail(id) {
     const doc = await getDoc("/novel/" + encodeURIComponent(id));
-    const title = clean(doc.querySelector("h1")?.text() || doc.querySelector("title")?.text());
+    const data = nuxt(doc);
+    let title = clean(doc.querySelector("h1")?.text() || doc.querySelector("title")?.text());
+    let cover;
+    let description = clean(doc.querySelector(".description")?.text() || doc.querySelector(".summary")?.text() || doc.querySelector("[class*='description']")?.text());
+
+    try {
+      const info = data.fetch[0].novel;
+      title = clean(info.arabic || info.title || title);
+      cover = apiCover(info.poster_url);
+      description = clean(info.description || info.summary || description);
+    } catch (_) {}
+
+    if (!cover) {
+      const meta = doc.querySelector("meta[property='og:image'], meta[name='twitter:image']");
+      cover = abs(meta?.attr("content"));
+    }
+    if (!cover) {
+      const img = doc.querySelector("img[data-src], img[data-lazy-src], img[src]");
+      cover = abs(img?.attr("data-src") || img?.attr("data-lazy-src") || img?.attr("src"));
+    }
+
     if (!title) return null;
-
-    const coverMeta = doc.querySelector("meta[property='og:image'], meta[name='twitter:image']");
-    const coverImg = doc.querySelector("img[src*='/media/novel/'], img[data-src*='/media/novel/'], img[data-lazy-src*='/media/novel/'], img[data-original*='/media/novel/'], img[src], img[data-src]");
-    const cover = abs(coverMeta?.attr("content")) || imageUrl(coverImg);
-
-    const description = clean(
-      doc.querySelector(".description")?.text() ||
-      doc.querySelector(".summary")?.text() ||
-      doc.querySelector("[class*='description']")?.text()
-    );
-
-    return {
-      id,
-      title,
-      cover,
-      description: description || undefined
-    };
+    return { id, title, cover, description: description || undefined };
   },
 
   async chapters(id) {
     const chapters = [];
     const seen = {};
+    const first = await getDoc("/novel/" + encodeURIComponent(id));
+    const data = nuxt(first);
 
-    // Rewayat paginates the chapter list at 24 chapters per page.
-    // The novel page exposes the total count as: الفصول (N).
-    const firstDoc = await getDoc("/novel/" + encodeURIComponent(id));
-    addChaptersFromDoc(firstDoc, id, chapters, seen);
+    let total = 0;
+    if (data) total = chaptersFromNuxt(data, id, chapters, seen);
+    extractChapterLinks(first, id, chapters, seen);
 
-    const total = chapterCount(firstDoc);
-    const totalPages = total > 0 ? Math.ceil(total / CHAPTERS_PER_PAGE) : 100;
+    // The visible novel page is paginated. Keep walking pages until no new chapters remain.
+    // NUXT pagination gives the exact total when available, otherwise the empty-page stop is used.
+    let totalPages = 1;
+    try {
+      const p = data.fetch[0].pagination;
+      const perPage = Number(p.per_page || p.page_size || total || 24);
+      const count = Number(p.count || p.total || 0);
+      if (count > 0 && perPage > 0) totalPages = Math.ceil(count / perPage);
+    } catch (_) {}
+
+    if (totalPages < 1) totalPages = 1;
+    if (totalPages > 1000) totalPages = 1000;
 
     for (let page = 2; page <= totalPages; page++) {
-      const doc = await getDoc("/novel/" + encodeURIComponent(id) + "?page=" + page);
+      const pageDoc = await getDoc("/novel/" + encodeURIComponent(id) + "?page=" + page);
       const before = chapters.length;
-      addChaptersFromDoc(doc, id, chapters, seen);
-
-      // If pagination stops returning new chapters, stop instead of making
-      // unnecessary requests. This also handles novels whose count changes.
-      if (chapters.length === before) break;
+      const pageData = nuxt(pageDoc);
+      if (pageData) chaptersFromNuxt(pageData, id, chapters, seen);
+      extractChapterLinks(pageDoc, id, chapters, seen);
+      if (chapters.length === before && page > 2) break;
     }
 
-    chapters.sort((a, b) => {
-      const na = Number(a.chapter);
-      const nb = Number(b.chapter);
-      if (!isNaN(na) && !isNaN(nb)) return na - nb;
-      return a.position - b.position;
-    });
-
+    chapters.sort((a, b) => Number(a.chapter) - Number(b.chapter));
     return chapters.map((c, i) => ({
       id: c.id,
       chapter: c.chapter,
@@ -180,27 +216,37 @@ const plugin = {
 
   async content(chapterId) {
     const doc = await getDoc("/" + String(chapterId).replace(/^\/+/, ""));
+    const data = nuxt(doc);
 
-    // Rewayat's actual chapter text container.
-    const root =
-      doc.querySelector(".chapter-content") ||
-      doc.querySelector("[class*='chapter-content']");
+    // Rewayat stores the real chapter HTML inside NUXT contentParts.
+    try {
+      const fetch0 = data && data.fetch && data.fetch[0];
+      const parts = fetch0 && fetch0.contentParts;
+      if (parts && parts.map) {
+        const html = parts.map((group) => {
+          if (!group || !group.map) return "";
+          return group.map((x) => String(x.content || "")).join("\n");
+        }).join("\n");
+        if (html.trim()) {
+          const contentDoc = harbor.parseHtml("<div id='rewayat-content'>" + html + "</div>");
+          const root = contentDoc.querySelector("#rewayat-content");
+          if (root) {
+            const blocks = root.querySelectorAll("p, h1, h2, h3, h4, blockquote, br")
+              .map((node) => clean(node.text()))
+              .filter(Boolean);
+            if (blocks.length) return blocks.join("\n\n");
+            const text = clean(root.text());
+            if (text) return text;
+          }
+        }
+      }
+    } catch (_) {}
 
-    if (!root) {
-      const article = doc.querySelector("article");
-      if (!article) return "";
-      const fallback = article.querySelectorAll("p, blockquote")
-        .map((node) => clean(node.text()))
-        .filter(Boolean);
-      return fallback.length ? fallback.join("\n\n") : clean(article.text());
-    }
-
-    const parts = root.querySelectorAll("p, blockquote")
-      .map((node) => clean(node.text()))
-      .filter(Boolean);
-
-    if (parts.length) return parts.join("\n\n");
-    return clean(root.text());
+    const article = doc.querySelector(".chapter-content") || doc.querySelector("article");
+    if (!article) return "";
+    const blocks = article.querySelectorAll("p, blockquote").map((node) => clean(node.text())).filter(Boolean);
+    if (blocks.length) return blocks.join("\n\n");
+    return clean(article.text());
   },
 
   async tags() {
