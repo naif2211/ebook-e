@@ -17,6 +17,14 @@
       "lang": "ar",
       "nsfw": false,
       "entry": "kolnovel2.plugin.js"
+    },
+    {
+      "id": "rewayat",
+      "name": "نادي الروايات",
+      "version": "1.0.0",
+      "lang": "ar",
+      "nsfw": false,
+      "entry": "rewayat.plugin.js"
     }
   ]
 }
