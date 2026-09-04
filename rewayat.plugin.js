@@ -35,10 +35,8 @@ function novelId(href) {
 function chapterPath(href) {
   if (!href) return "";
   let s = String(href).split("#")[0].split("?")[0];
-  try {
-    if (/^https?:\/\//i.test(s)) s = new URL(s).pathname;
-  } catch (_) {}
-  return s.replace(/^\//, "");
+  s = s.replace(/^https?:\/\/[^/]+/i, "");
+  return s.replace(/^\/+/, "");
 }
 
 function chapterNumber(text) {
@@ -157,12 +155,8 @@ const plugin = {
       const m = path.match(/^novel\/([^/]+)\/(\d+)\/?$/i);
       if (!m) return null;
 
-      let seriesId = "";
-      try {
-        seriesId = decodeURIComponent(m[1]);
-      } catch (_) {
-        seriesId = m[1];
-      }
+      let seriesId = m[1];
+      try { seriesId = decodeURIComponent(seriesId); } catch (_) {}
       if (seriesId !== id) return null;
 
       const key = path.replace(/\/$/, "");
@@ -198,7 +192,11 @@ const plugin = {
   async content(chapterId) {
     const doc = await getDoc("/" + String(chapterId).replace(/^\/+/, ""));
 
-    const root = doc.querySelector(".chapter-content");
+    const root =
+      doc.querySelector(".chapter-content") ||
+      doc.querySelector("[class*='chapter-content']") ||
+      doc.querySelector("article");
+
     if (!root) return "";
 
     const parts = root.querySelectorAll("p, blockquote")
