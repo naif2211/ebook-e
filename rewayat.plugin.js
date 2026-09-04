@@ -34,7 +34,7 @@ function novelId(href) {
 
 function chapterPath(href) {
   if (!href) return "";
-  let s = String(href).split("#")[0];
+  let s = String(href).split("#")[0].split("?")[0];
   try {
     if (/^https?:\/\//i.test(s)) s = new URL(s).pathname;
   } catch (_) {}
@@ -167,7 +167,7 @@ const plugin = {
       const title = clean(a.text());
       if (!title) continue;
 
-      const number = a.attr("data-number") || m[2] || chapterNumber(title);
+      const number = m[2] || a.attr("data-number") || chapterNumber(title);
       const key = path.replace(/\/$/, "");
       if (seen[key]) continue;
       seen[key] = true;
