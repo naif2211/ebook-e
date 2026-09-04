@@ -57,9 +57,10 @@ function cardFromLink(a) {
   const id = novelId(href);
   if (!id) return null;
 
+  const img = a.querySelector("img");
   const title = clean(
     a.attr("title") ||
-    a.querySelector("img")?.attr("alt") ||
+    img?.attr("alt") ||
     a.text()
   );
 
@@ -75,12 +76,11 @@ function cardFromLink(a) {
 function extractNovels(doc) {
   const out = [];
   const seen = {};
-  const links = doc.querySelectorAll("a[href]");
-  for (const a of links) {
+  doc.querySelectorAll("a[href]").map((a) => {
     const item = cardFromLink(a);
-    if (!item) continue;
-    uniquePush(out, seen, item);
-  }
+    if (item) uniquePush(out, seen, item);
+    return null;
+  });
   return out;
 }
 
@@ -130,10 +130,11 @@ const plugin = {
       );
 
     const genres = [];
-    for (const a of doc.querySelectorAll("a[href*='genre']")) {
+    doc.querySelectorAll("a[href*='genre']").map((a) => {
       const g = clean(a.text());
       if (g && genres.indexOf(g) < 0) genres.push(g);
-    }
+      return null;
+    });
 
     return {
       id,
@@ -150,13 +151,11 @@ const plugin = {
 
     const chapters = [];
     const seen = {};
-    const links = doc.querySelectorAll("a[href]");
-
-    for (const a of links) {
+    doc.querySelectorAll("a[href]").map((a) => {
       const href = a.attr("href") || "";
       const path = chapterPath(href);
       const m = path.match(/^novel\/([^/]+)\/(\d+)\/?$/i);
-      if (!m) continue;
+      if (!m) return null;
 
       let seriesId = "";
       try {
@@ -164,10 +163,10 @@ const plugin = {
       } catch (_) {
         seriesId = m[1];
       }
-      if (seriesId !== id) continue;
+      if (seriesId !== id) return null;
 
       const key = path.replace(/\/$/, "");
-      if (seen[key]) continue;
+      if (seen[key]) return null;
       seen[key] = true;
 
       const number = m[2];
@@ -181,7 +180,8 @@ const plugin = {
         pages: 0,
         language: "ar"
       });
-    }
+      return null;
+    });
 
     chapters.sort((a, b) => Number(a.chapter) - Number(b.chapter));
 
@@ -198,33 +198,16 @@ const plugin = {
   async content(chapterId) {
     const doc = await getDoc("/" + String(chapterId).replace(/^\/+/, ""));
 
-    const roots = [
-      ".chapter-content",
-      ".reading-content",
-      ".chapter-body",
-      ".reading-area",
-      ".novel-content",
-      ".content",
-      "article"
-    ];
+    const root = doc.querySelector(".chapter-content");
+    if (!root) return "";
 
-    for (const selector of roots) {
-      const root = doc.querySelector(selector);
-      if (!root) continue;
+    const parts = root.querySelectorAll("p, blockquote")
+      .map((node) => clean(node.text()))
+      .filter(Boolean);
 
-      const parts = [];
-      for (const node of root.querySelectorAll("p, blockquote")) {
-        const text = clean(node.text());
-        if (text) parts.push(text);
-      }
+    if (parts.length) return parts.join("\n\n");
 
-      if (parts.length) return parts.join("\n\n");
-
-      const fallback = clean(root.text());
-      if (fallback) return fallback;
-    }
-
-    return "";
+    return clean(root.text());
   },
 
   async tags() {
