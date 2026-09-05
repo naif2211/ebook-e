@@ -174,36 +174,56 @@ const plugin = {
   async chapters(id) {
     const chapters = [];
     const seen = {};
-    const first = await getDoc("/novel/" + encodeURIComponent(id));
-    const data = nuxt(first);
 
-    let total = 0;
-    if (data) total = chaptersFromNuxt(data, id, chapters, seen);
-    extractChapterLinks(first, id, chapters, seen);
-
-    // The visible novel page is paginated. Keep walking pages until no new chapters remain.
-    // NUXT pagination gives the exact total when available, otherwise the empty-page stop is used.
-    let totalPages = 1;
+    // Rewayat uses real pagination: page 1, page 2, page 3...
+    // Do not rely on NUXT state because Harbor only receives the server HTML.
+    // The page itself exposes the total count as "الفصول (N)".
+    let expected = 0;
     try {
-      const p = data.fetch[0].pagination;
-      const perPage = Number(p.per_page || p.page_size || total || 24);
-      const count = Number(p.count || p.total || 0);
-      if (count > 0 && perPage > 0) totalPages = Math.ceil(count / perPage);
-    } catch (_) {}
+      const first = await getDoc("/novel/" + encodeURIComponent(id));
+      const countText = clean(first.querySelector("body")?.text() || "");
+      const m = countText.match(/الفصول\s*\(\s*(\d+)\s*\)/u);
+      if (m) expected = Number(m[1]) || 0;
 
-    if (totalPages < 1) totalPages = 1;
-    if (totalPages > 1000) totalPages = 1000;
+      extractChapterLinks(first, id, chapters, seen);
 
-    for (let page = 2; page <= totalPages; page++) {
-      const pageDoc = await getDoc("/novel/" + encodeURIComponent(id) + "?page=" + page);
-      const before = chapters.length;
-      const pageData = nuxt(pageDoc);
-      if (pageData) chaptersFromNuxt(pageData, id, chapters, seen);
-      extractChapterLinks(pageDoc, id, chapters, seen);
-      if (chapters.length === before && page > 2) break;
+      // Rewayat currently serves 24 chapters per page. We still continue
+      // until a page contains no new chapter links, so this also works if
+      // the page size changes.
+      const maxPages = expected > 0 ? Math.ceil(expected / 24) + 2 : 200;
+
+      for (let page = 2; page <= maxPages; page++) {
+        const pageDoc = await getDoc(
+          "/novel/" + encodeURIComponent(id) + "?page=" + page
+        );
+        const before = chapters.length;
+        extractChapterLinks(pageDoc, id, chapters, seen);
+
+        if (chapters.length === before) break;
+      }
+    } catch (e) {
+      // If the first request failed, preserve Harbor's normal error handling.
+      throw e;
     }
 
-    chapters.sort((a, b) => Number(a.chapter) - Number(b.chapter));
+    // "9999" on some Rewayat pages is a non-chapter link/comment artifact.
+    // If the site gives us an official chapter count, never return that artifact.
+    if (expected > 0) {
+      const filtered = chapters.filter((c) => {
+        const n = Number(c.chapter);
+        return Number.isFinite(n) && n >= 1 && n <= expected;
+      });
+      chapters.length = 0;
+      chapters.push(...filtered);
+    }
+
+    chapters.sort((a, b) => {
+      const na = Number(a.chapter);
+      const nb = Number(b.chapter);
+      if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+      return a.title.localeCompare(b.title);
+    });
+
     return chapters.map((c, i) => ({
       id: c.id,
       chapter: c.chapter,
