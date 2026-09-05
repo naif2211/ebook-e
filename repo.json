@@ -21,7 +21,7 @@
     {
       "id": "rewayat",
       "name": "نادي الروايات",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "lang": "ar",
       "nsfw": false,
       "entry": "rewayat.plugin.js"
