@@ -1,6 +1,7 @@
 {
   "type": "ebook",
-  "name": "KolNovel Repository",
+  "name": "NAIF eBook Repository",
+  "iconUrl": "https://rewayat.club/favicon.ico",
   "plugins": [
     {
       "id": "kolnovel",
@@ -8,6 +9,7 @@
       "version": "1.7.2",
       "lang": "ar",
       "nsfw": false,
+      "icon": "https://kolnovel.com/favicon.ico",
       "entry": "kolnovel.plugin.js"
     },
     {
@@ -16,14 +18,16 @@
       "version": "1.0.0",
       "lang": "ar",
       "nsfw": false,
+      "icon": "https://kolnovel.com/favicon.ico",
       "entry": "kolnovel2.plugin.js"
     },
     {
       "id": "rewayat",
       "name": "نادي الروايات",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "lang": "ar",
       "nsfw": false,
+      "icon": "https://rewayat.club/favicon.ico",
       "entry": "rewayat.plugin.js"
     }
   ]
