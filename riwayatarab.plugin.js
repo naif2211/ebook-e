@@ -1,15 +1,14 @@
-// Harbor eBook source for RiwayatArab (riwayatarab.com)
-// Focused on reliable Arabic novel chapters/content extraction.
-// No DOM/fetch/storage: network only through harbor.http and HTML through harbor.parseHtml.
+// Harbor eBook source for RiwayatArab
+// v1.1.0 - broader work discovery + reliable chapter pagination + content extraction.
 
 const BASE = "https://riwayatarab.com";
-const PAGE_SIZE = 50;
+const WORK_PAGE_SIZE = 20;
 
 async function getDoc(path) {
   const url = /^https?:\/\//i.test(path)
     ? path
     : BASE + (path.startsWith("/") ? path : "/" + path);
-  const res = await harbor.http(url, { responseType: "text", timeoutMs: 20000 });
+  const res = await harbor.http(url, { responseType: "text", timeoutMs: 25000 });
   if (!res.ok) throw new Error("HTTP " + res.status + " for " + url);
   return harbor.parseHtml(res.body);
 }
@@ -31,9 +30,13 @@ function clean(v) {
     .trim();
 }
 
+function sameHost(url) {
+  return /^https?:\/\/riwayatarab\.com(?:\/|$)/i.test(String(url || ""));
+}
+
 function novelId(href) {
   const u = abs(href) || "";
-  const m = u.match(/\/novel\/([^/?#]+)(?:\/?(?:[?#].*)?)$/i);
+  const m = u.match(/\/novel\/([^/?#]+)\/?(?:[?#].*)?$/i);
   if (!m) return "";
   try { return decodeURIComponent(m[1]); } catch (_) { return m[1]; }
 }
@@ -44,14 +47,25 @@ function novelPath(id) {
 
 function chapterNumber(text, url) {
   const s = clean(text);
-  let m = s.match(/(?:الفصل|فصل|chapter|ch\.?)[\s:#-]*(\d+(?:\.\d+)?)/iu);
+  let m = s.match(/(?:الفصل|فصل|chapter|chap|ch\.?)[\s:#-]*(\d+(?:\.\d+)?)/iu);
   if (m) return m[1];
-  m = String(url || "").match(/\/chapter\/(\d+(?:\.\d+)?)\/?(?:[?#].*)?$/i);
+
+  const u = String(url || "");
+  m = u.match(/\/chapter\/(\d+(?:\.\d+)?)(?:[/?#]|$)/i);
+  if (m) return m[1];
+
+  // Some deployments use /novel/<slug>/<number> for the chapter page.
+  m = u.match(/\/novel\/[^/?#]+\/(\d+(?:\.\d+)?)(?:[/?#]|$)/i);
   return m ? m[1] : undefined;
 }
 
 function isChapterUrl(url) {
-  return /\/novel\/[^/?#]+\/chapter\/\d+(?:[/?#]|$)/i.test(String(url || ""));
+  const u = String(url || "");
+  return sameHost(u) && (
+    /\/novel\/[^/?#]+\/chapter\/[^/?#]+/i.test(u) ||
+    /\/novel\/[^/?#]+\/chapter\/?(?:[?#]|$)/i.test(u) ||
+    /\/novel\/[^/?#]+\/\d+(?:[/?#]|$)/i.test(u)
+  );
 }
 
 function chapterId(url) {
@@ -62,7 +76,9 @@ function chapterId(url) {
 
 function novelCard(link) {
   const href = link.attr("href") || "";
-  if (!/\/novel\/[^/]+\/?(?:[?#].*)?$/i.test(abs(href) || "")) return null;
+  const url = abs(href);
+  if (!url || !sameHost(url)) return null;
+
   const id = novelId(href);
   if (!id) return null;
 
@@ -75,23 +91,32 @@ function novelCard(link) {
     link.text()
   );
 
-  // Homepage cards can contain metadata/description after the title.
-  title = title.split(/(?:بقلم|آخر تحديث|فصل|ك فصل)/iu)[0].trim();
-  if (!title) return null;
+  title = title
+    .replace(/(?:\s+بقلم\s+.*)$/iu, "")
+    .replace(/(?:\s+آخر\s+تحديث.*)$/iu, "")
+    .replace(/(?:\s+\d+\s+فصل.*)$/iu, "")
+    .trim();
+
+  if (!title || title.length > 300) return null;
 
   return {
     id,
     title,
-    cover: abs(img?.attr("data-src") || img?.attr("data-lazy-src") || img?.attr("src")),
-    siteUrl: abs(href)
+    cover: abs(
+      img?.attr("data-src") ||
+      img?.attr("data-lazy-src") ||
+      img?.attr("data-original") ||
+      img?.attr("src")
+    )
   };
 }
 
 function extractNovelCards(doc) {
-  const links = doc.querySelectorAll("a[href]");
   const out = [];
   const seen = {};
-  for (const link of links) {
+
+  // Prefer actual /novel/<slug> links. This avoids navigation/category links.
+  for (const link of doc.querySelectorAll("a[href]")) {
     const item = novelCard(link);
     if (!item || seen[item.id]) continue;
     seen[item.id] = true;
@@ -100,22 +125,82 @@ function extractNovelCards(doc) {
   return out;
 }
 
-function totalChapterPages(doc) {
-  const text = clean(doc.text());
-  const m = text.match(/الصفحة\s+\d+\s+من\s+(\d+)/iu);
-  if (m) return Math.max(1, Number(m[1]));
-  let max = 1;
+function pageFromUrl(url) {
+  const m = String(url || "").match(/[?&](?:page|p)=(\d+)/i);
+  return m ? Number(m[1]) : 0;
+}
+
+function paginationPages(doc, basePattern) {
+  const pages = [];
   for (const a of doc.querySelectorAll("a[href]")) {
-    const href = a.attr("href") || "";
-    const m2 = href.match(/[?&]page=(\d+)/i);
-    if (m2) max = Math.max(max, Number(m2[1]));
+    const href = abs(a.attr("href"));
+    if (!href || !sameHost(href)) continue;
+    if (basePattern.test(href)) {
+      const p = pageFromUrl(href);
+      if (p > 1) pages.push(p);
+    }
   }
-  return max;
+  return pages;
+}
+
+async function collectWorkPage(paths) {
+  for (const path of paths) {
+    try {
+      const doc = await getDoc(path);
+      const cards = extractNovelCards(doc);
+      if (cards.length) return { doc, cards };
+    } catch (_) {}
+  }
+  return { doc: null, cards: [] };
+}
+
+async function popularWorks(offset) {
+  const page = Math.floor(Number(offset || 0) / WORK_PAGE_SIZE) + 1;
+
+  // Different RiwayatArab deployments have used more than one listing route.
+  // Try the most specific routes first and keep the first non-empty result.
+  const paths = page === 1
+    ? [
+        "/",
+        "/novels",
+        "/novels?page=1",
+        "/search?sort=views&page=1",
+        "/search?sort=popular&page=1"
+      ]
+    : [
+        "/novels?page=" + page,
+        "/search?sort=views&page=" + page,
+        "/search?sort=popular&page=" + page,
+        "/?page=" + page
+      ];
+
+  const result = await collectWorkPage(paths);
+  return result.cards;
+}
+
+async function searchWorks(query, offset) {
+  const q = clean(query);
+  if (!q) return [];
+
+  const page = Math.floor(Number(offset || 0) / WORK_PAGE_SIZE) + 1;
+  const encoded = encodeURIComponent(q);
+
+  const paths = [
+    "/search?q=" + encoded + "&page=" + page,
+    "/search?query=" + encoded + "&page=" + page,
+    "/search?search=" + encoded + "&page=" + page,
+    "/novels?search=" + encoded + "&page=" + page,
+    "/novels?q=" + encoded + "&page=" + page
+  ];
+
+  const result = await collectWorkPage(paths);
+  return result.cards;
 }
 
 function extractChapterLinks(doc) {
   const out = [];
   const seen = {};
+
   for (const a of doc.querySelectorAll("a[href]")) {
     const href = a.attr("href") || "";
     const url = abs(href);
@@ -124,32 +209,77 @@ function extractChapterLinks(doc) {
     const id = chapterId(url);
     if (!id || seen[id]) continue;
 
-    const title = clean(a.text()) || clean(a.attr("title")) || clean(a.attr("aria-label"));
+    const title = clean(
+      a.text() ||
+      a.attr("title") ||
+      a.attr("aria-label") ||
+      ""
+    );
+
     const number = chapterNumber(title, url);
-    if (!number) continue;
+    // A chapter number is preferred, but don't discard a valid chapter link
+    // merely because the site's anchor text does not contain it.
+    if (!number && !/\/chapter\//i.test(url)) continue;
 
     seen[id] = true;
     out.push({
       id,
-      chapter: number,
-      title: title || "الفصل " + number,
+      chapter: number || String(out.length + 1),
+      title: title || ("الفصل " + (number || (out.length + 1))),
       pages: 0,
       language: "ar"
     });
   }
+
   return out;
 }
 
-async function loadAllChapters(id) {
-  const first = await getDoc(novelPath(id) + "/chapters");
-  const pages = totalChapterPages(first);
-  const all = extractChapterLinks(first);
+function chapterPageNumbers(doc) {
+  const pages = [];
+  for (const a of doc.querySelectorAll("a[href]")) {
+    const href = abs(a.attr("href"));
+    if (!href || !/\/chapters(?:[/?#]|$)/i.test(href)) continue;
+    const p = pageFromUrl(href);
+    if (p > 1) pages.push(p);
+  }
+  return pages;
+}
 
-  // RiwayatArab currently paginates chapter lists at 50 chapters/page.
-  // Fetch every page so Harbor does not show only the first 50 chapters.
-  for (let page = 2; page <= pages; page++) {
-    const doc = await getDoc(novelPath(id) + "/chapters?page=" + page);
+async function loadAllChapters(id) {
+  const base = novelPath(id) + "/chapters";
+  const first = await getDoc(base);
+
+  const all = extractChapterLinks(first);
+  const knownPages = chapterPageNumbers(first);
+  let maxPage = knownPages.length ? Math.max(...knownPages) : 1;
+
+  // If pagination links are hidden or incomplete, probe sequential pages.
+  // Stop after two consecutive pages with no new chapters.
+  let emptyStreak = 0;
+  const hardLimit = Math.max(maxPage, 100);
+
+  for (let page = 2; page <= hardLimit; page++) {
+    if (page > maxPage && emptyStreak >= 2) break;
+
+    let doc;
+    try {
+      doc = await getDoc(base + "?page=" + page);
+    } catch (_) {
+      emptyStreak++;
+      if (emptyStreak >= 2 && page > maxPage) break;
+      continue;
+    }
+
+    const before = all.length;
     all.push(...extractChapterLinks(doc));
+
+    if (all.length === before) emptyStreak++;
+    else emptyStreak = 0;
+
+    if (all.length && page >= maxPage) {
+      const more = chapterPageNumbers(doc);
+      if (more.length) maxPage = Math.max(maxPage, ...more);
+    }
   }
 
   const unique = [];
@@ -164,7 +294,7 @@ async function loadAllChapters(id) {
     const an = Number(a.chapter);
     const bn = Number(b.chapter);
     if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
-    return String(a.chapter).localeCompare(String(b.chapter), "ar");
+    return String(a.title).localeCompare(String(b.title), "ar");
   });
 
   for (let i = 0; i < unique.length; i++) unique[i].position = i;
@@ -172,43 +302,60 @@ async function loadAllChapters(id) {
 }
 
 function findContent(doc) {
+  // Never choose generic .prose first: on some pages it is the novel
+  // description, while the actual chapter is further down the document.
   const selectors = [
-    "article .prose",
-    "article .chapter-content",
-    "article .reading-content",
+    "[class*='chapter-content']",
+    "[class*='chapter_content']",
+    "[class*='reading-content']",
+    "[class*='reading_content']",
+    "[class*='chapter-body']",
+    "[class*='chapter_body']",
+    "[id*='chapter-content']",
+    "[id*='reading-content']",
     "article .entry-content",
-    ".chapter-content",
-    ".reading-content",
-    ".novel-content",
-    ".prose",
+    "article .chapter",
     "article",
     "main article",
-    "main"
+    ".novel-content",
+    ".prose"
   ];
-  for (const s of selectors) {
-    const node = doc.querySelector(s);
-    if (node) return node;
+
+  for (const selector of selectors) {
+    const node = doc.querySelector(selector);
+    if (node && clean(node.text()).length > 80) return node;
   }
   return null;
 }
 
 function isBoilerplate(text) {
-  return /^(?:جميع الحقوق محفوظة|حقوق .* محفوظة|الحقوق محفوظة|شكراً لدعمك|شكرًا لدعمك|الفصل\s+\d+\s+من\s+\d+)\b/iu.test(text) ||
+  return /^(?:جميع الحقوق محفوظة|حقوق .* محفوظة|الحقوق محفوظة|شكراً لدعمك|شكرًا لدعمك)\b/iu.test(text) ||
     /(?:اقرأ.*رواياتنا|قراءة.*موقعنا|دعم.*المترجم)/iu.test(text);
 }
 
 function extractContent(root) {
   if (!root) return "";
-  const nodes = root.querySelectorAll("p, blockquote");
+
+  const nodes = root.querySelectorAll("p, blockquote, div");
   const out = [];
+  const seen = {};
 
   for (const node of nodes) {
     const text = clean(node.text());
-    if (!text || isBoilerplate(text)) continue;
+    if (!text || text.length < 2 || isBoilerplate(text)) continue;
+
+    // Avoid adding a parent div and then all of its child paragraphs again.
+    const key = text;
+    if (seen[key]) continue;
+    seen[key] = true;
+
+    if (node.querySelector("p, blockquote")) continue;
     out.push(text);
   }
 
-  return out.length ? out.join("\n\n") : clean(root.text());
+  if (out.length) return out.join("\n\n");
+
+  return clean(root.text());
 }
 
 const plugin = {
@@ -216,32 +363,11 @@ const plugin = {
   name: "رواياتعرب",
 
   async popular(offset) {
-    const page = Math.floor(Number(offset || 0) / 20) + 1;
-    const path = page <= 1 ? "/" : "/search?sort=views&page=" + page;
-    return extractNovelCards(await getDoc(path));
+    return popularWorks(offset);
   },
 
   async search(query, offset) {
-    const q = clean(query);
-    if (!q) return [];
-    const page = Math.floor(Number(offset || 0) / 20) + 1;
-
-    // The public search page is server-rendered with query parameters on some
-    // deployments. Try the common parameter names; unsupported ones simply
-    // return an empty result.
-    const paths = [
-      "/search?q=" + encodeURIComponent(q) + "&page=" + page,
-      "/search?query=" + encodeURIComponent(q) + "&page=" + page,
-      "/search?search=" + encodeURIComponent(q) + "&page=" + page
-    ];
-
-    for (const path of paths) {
-      try {
-        const results = extractNovelCards(await getDoc(path));
-        if (results.length) return results;
-      } catch (_) {}
-    }
-    return [];
+    return searchWorks(query, offset);
   },
 
   async detail(id) {
@@ -250,29 +376,37 @@ const plugin = {
     if (!title) return null;
 
     const img = doc.querySelector(
-      "img[alt*='لورد'], img.object-cover, img.rounded, img[data-src], img[src]"
+      "img[data-src], img[data-lazy-src], img[data-original], img.object-cover, img.rounded, img[src]"
     );
 
     const description = doc.querySelector(
-      "[class*='description'], [class*='summary'], .prose"
+      "[class*='description'], [class*='summary'], [class*='synopsis']"
     );
 
     const author = doc.querySelector(
-      "[class*='author'], [class*='writer']"
+      "[class*='author'], [class*='writer'], [rel='author']"
     );
 
-    const countText = clean(doc.text());
-    const countMatch = countText.match(/(\d+)\s+فصل/iu);
+    const text = clean(doc.text());
+    const countMatch = text.match(/(\d+)\s*(?:فصل|فصول|chapter|chapters)\b/iu);
 
     return {
       id,
       title,
-      cover: abs(img?.attr("data-src") || img?.attr("data-lazy-src") || img?.attr("src")),
+      cover: abs(
+        img?.attr("data-src") ||
+        img?.attr("data-lazy-src") ||
+        img?.attr("data-original") ||
+        img?.attr("src")
+      ),
       description: clean(description?.text()) || undefined,
       author: clean(author?.text()) || undefined,
       chapters: countMatch ? Number(countMatch[1]) : undefined,
-      status: /مكتملة/iu.test(countText) ? "completed" : /مستمرة/iu.test(countText) ? "ongoing" : undefined,
-      siteUrl: BASE + novelPath(id)
+      status: /مكتملة|مكتمل/iu.test(text)
+        ? "completed"
+        : /مستمرة|مستمر/iu.test(text)
+          ? "ongoing"
+          : undefined
     };
   },
 
@@ -283,6 +417,6 @@ const plugin = {
   async content(chapterId) {
     const doc = await getDoc(chapterId);
     const root = findContent(doc);
-    return extractContent(root) || extractContent(doc);
+    return extractContent(root) || clean(doc.text());
   }
 };
