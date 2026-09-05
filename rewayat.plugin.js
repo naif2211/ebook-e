@@ -152,31 +152,47 @@ const plugin = {
   },
 
   async chapters(id) {
-    const wanted = String(id || "").replace(/^\/+|\/+$/g, "");
-    const doc = await getDoc("/novel/" + encodeURIComponent(wanted) + "/");
-    const visible = extractChapters(doc, wanted);
-    const total = totalChapters(doc);
-    const byNumber = {};
-    for (let i = 0; i < visible.length; i++) byNumber[visible[i].number] = visible[i];
+    const wanted = String(id || "").replace(/^\\/+|\\/+$/g, "");
+    const first = await getDoc("/novel/" + encodeURIComponent(wanted) + "/");
+    const total = totalChapters(first);
+    const all = [];
+    const seen = {};
 
-    // The site shows only a limited number of chapter links in its HTML,
-    // but exposes the complete count as "الفصول (N)". Build the full list
-    // without requesting hundreds of pagination pages.
-    const count = total > 0 ? total : visible.length;
-    const out = [];
-    for (let n = 1; n <= count; n++) {
-      const existing = byNumber[n];
-      out.push({
-        id: existing ? existing.id : "/novel/" + wanted + "/" + n,
-        chapter: String(n),
-        title: existing ? existing.title : "الفصل " + n,
-        position: n - 1,
+    function add(doc) {
+      const items = extractChapters(doc, wanted);
+      for (let i = 0; i < items.length; i++) {
+        if (!seen[items[i].id]) {
+          seen[items[i].id] = true;
+          all.push(items[i]);
+        }
+      }
+    }
+
+    add(first);
+
+    const maxPages = total > 0 ? Math.ceil(total / 25) + 2 : 100;
+    for (let page = 2; page <= maxPages; page++) {
+      if (total > 0 && all.length >= total) break;
+      const before = all.length;
+      add(await getDoc("/novel/" + encodeURIComponent(wanted) + "/?page=" + page));
+      if (all.length === before) break;
+    }
+
+    all.sort(function(a, b) {
+      return Number(a.number) - Number(b.number);
+    });
+
+    return all.map(function(item, index) {
+      return {
+        id: item.id,
+        chapter: String(item.number),
+        title: item.title,
+        position: index,
         pages: 0,
         language: "ar"
-      });
-    }
-    return out;
-  },
+      };
+    });
+  }
 
   async content(chapterId) {
     const path = String(chapterId || "").replace(/^https?:\/\/rewayat\.club/i, "");
