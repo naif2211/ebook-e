@@ -37,27 +37,20 @@ function chapterInfo(href) {
   const s = relativePath(href);
   const m = s.match(/^\/novel\/([^/]+)\/(\d+)\/?$/i);
   if (!m) return null;
-  return {
-    id: s.replace(/\/$/, ""),
-    novel: decodeURIComponent(m[1]),
-    number: m[2]
-  };
+  return { id: s.replace(/\/$/, ""), novel: decodeURIComponent(m[1]), number: m[2] };
 }
 
 function novelCards(doc) {
   const out = [];
   const seen = {};
   const links = doc.querySelectorAll("a[href]");
-
   for (let i = 0; i < links.length; i++) {
     const a = links[i];
     const id = novelId(a.attr("href") || "");
     if (!id || seen[id]) continue;
-
     const img = a.querySelector("img");
     const title = clean(a.attr("title") || (img && (img.attr("alt") || img.attr("title"))) || a.text());
     if (!title) continue;
-
     seen[id] = true;
     out.push({
       id: id,
@@ -73,37 +66,26 @@ function extractChapters(doc, wanted) {
   const links = doc.querySelectorAll("a[href]");
   const out = [];
   const seen = {};
-
   for (let i = 0; i < links.length; i++) {
-    const href = links[i].attr("href") || "";
-    const info = chapterInfo(href);
-    if (!info || info.novel !== wanted || seen[info.id]) continue;
-
-    const text = clean(links[i].text());
-    const title = text || clean(links[i].attr("title")) || ("الفصل " + info.number);
-
-    // Rewayat also has some special numbered links (for example 9000/9999).
-    // Keep normal chapter numbers; Harbor will then show a clean chapter list.
+    const info = chapterInfo(links[i].attr("href") || "");
+    if (!info || info.novel !== wanted || seen[info.number]) continue;
     const number = Number(info.number);
     if (!Number.isFinite(number) || number < 1 || number > 8000) continue;
-
-    seen[info.id] = true;
+    seen[info.number] = true;
     out.push({
+      number: number,
       id: info.id,
-      chapter: info.number,
-      title: title,
-      position: 0,
-      pages: 0,
-      language: "ar"
+      title: clean(links[i].text()) || "الفصل " + info.number
     });
   }
-
-  out.sort(function(a, b) {
-    return Number(a.chapter) - Number(b.chapter);
-  });
-
-  for (let i = 0; i < out.length; i++) out[i].position = i;
+  out.sort(function(a, b) { return a.number - b.number; });
   return out;
+}
+
+function totalChapters(doc) {
+  const text = clean(doc.text());
+  const m = text.match(/الفصول\s*[\(（]\s*(\d+)\s*[\)）]/u);
+  return m ? Number(m[1]) : 0;
 }
 
 function findContent(doc) {
@@ -116,7 +98,6 @@ function findContent(doc) {
     "article .entry-content",
     "article"
   ];
-
   for (let i = 0; i < selectors.length; i++) {
     const node = doc.querySelector(selectors[i]);
     if (node) return node;
@@ -126,11 +107,9 @@ function findContent(doc) {
 
 function extractText(root) {
   if (!root) return "";
-
   const nodes = root.querySelectorAll("p, blockquote");
   const out = [];
   const seen = {};
-
   for (let i = 0; i < nodes.length; i++) {
     const text = clean(nodes[i].text());
     if (text && !seen[text]) {
@@ -138,7 +117,6 @@ function extractText(root) {
       out.push(text);
     }
   }
-
   return out.length ? out.join("\n\n") : clean(root.text());
 }
 
@@ -163,13 +141,12 @@ const plugin = {
     const img = doc.querySelector("img[data-src], img[data-lazy-src], img[src]");
     const desc = doc.querySelector(".description, .summary, .novel-description, [class*='description']");
     const title = clean(h1 ? h1.text() : id);
-
     return {
       id: id,
       title: title,
       cover: abs(og ? og.attr("content") : (img ? (img.attr("data-src") || img.attr("data-lazy-src") || img.attr("src")) : undefined)),
       description: desc ? clean(desc.text()) : undefined,
-      chapters: extractChapters(doc, id).length,
+      chapters: totalChapters(doc),
       siteUrl: BASE + "/novel/" + encodeURIComponent(id) + "/"
     };
   },
@@ -177,7 +154,28 @@ const plugin = {
   async chapters(id) {
     const wanted = String(id || "").replace(/^\/+|\/+$/g, "");
     const doc = await getDoc("/novel/" + encodeURIComponent(wanted) + "/");
-    return extractChapters(doc, wanted);
+    const visible = extractChapters(doc, wanted);
+    const total = totalChapters(doc);
+    const byNumber = {};
+    for (let i = 0; i < visible.length; i++) byNumber[visible[i].number] = visible[i];
+
+    // The site shows only a limited number of chapter links in its HTML,
+    // but exposes the complete count as "الفصول (N)". Build the full list
+    // without requesting hundreds of pagination pages.
+    const count = total > 0 ? total : visible.length;
+    const out = [];
+    for (let n = 1; n <= count; n++) {
+      const existing = byNumber[n];
+      out.push({
+        id: existing ? existing.id : "/novel/" + wanted + "/" + n,
+        chapter: String(n),
+        title: existing ? existing.title : "الفصل " + n,
+        position: n - 1,
+        pages: 0,
+        language: "ar"
+      });
+    }
+    return out;
   },
 
   async content(chapterId) {
