@@ -1,8 +1,8 @@
 // Harbor eBook source for RiwayatArab
-// v1.1.0 - broader work discovery + reliable chapter pagination + content extraction.
+// v1.2.0 - fixed Harbor offset paging and direct chapter URL fallback.
 
 const BASE = "https://riwayatarab.com";
-const WORK_PAGE_SIZE = 20;
+const WORK_PAGE_SIZE = 48;
 
 async function getDoc(path) {
   const url = /^https?:\/\//i.test(path)
@@ -162,12 +162,18 @@ async function popularWorks(offset) {
   const paths = page === 1
     ? [
         "/",
+        "/latest",
+        "/popular",
+        "/new",
         "/novels",
         "/novels?page=1",
         "/search?sort=views&page=1",
         "/search?sort=popular&page=1"
       ]
     : [
+        "/latest?page=" + page,
+        "/popular?page=" + page,
+        "/new?page=" + page,
         "/novels?page=" + page,
         "/search?sort=views&page=" + page,
         "/search?sort=popular&page=" + page,
@@ -252,6 +258,30 @@ async function loadAllChapters(id) {
   const all = extractChapterLinks(first);
   const knownPages = chapterPageNumbers(first);
   let maxPage = knownPages.length ? Math.max(...knownPages) : 1;
+
+  // Fallback for Harbor: if the /chapters HTML does not expose the chapter
+  // anchors, build the real chapter URLs directly from the novel chapter count.
+  if (all.length === 0) {
+    try {
+      const detailDoc = await getDoc(novelPath(id));
+      const text = clean(detailDoc.text());
+      const match = text.match(/(\\d[\\d,]*)\\s*(?:فصل|فصول|chapter|chapters)\\b/iu);
+      const count = match ? Number(match[1].replace(/,/g, "")) : 0;
+      if (count > 0 && count <= 10000) {
+        for (let n = 1; n <= count; n++) {
+          all.push({
+            id: novelPath(id) + "/chapter/" + n,
+            chapter: String(n),
+            title: "الفصل " + n,
+            pages: 0,
+            language: "ar",
+            position: n - 1
+          });
+        }
+        return all;
+      }
+    } catch (_) {}
+  }
 
   // If pagination links are hidden or incomplete, probe sequential pages.
   // Stop after two consecutive pages with no new chapters.
