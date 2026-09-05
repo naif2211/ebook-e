@@ -174,56 +174,39 @@ const plugin = {
   async chapters(id) {
     const chapters = [];
     const seen = {};
+    const slug = String(id || "").replace(/^\/+|\/+$/g, "");
 
-    // Rewayat uses real pagination: page 1, page 2, page 3...
-    // Do not rely on NUXT state because Harbor only receives the server HTML.
-    // The page itself exposes the total count as "الفصول (N)".
-    let expected = 0;
-    try {
-      const first = await getDoc("/novel/" + encodeURIComponent(id));
-      const countText = clean(first.querySelector("body")?.text() || "");
-      const m = countText.match(/الفصول\s*\(\s*(\d+)\s*\)/u);
-      if (m) expected = Number(m[1]) || 0;
-
-      extractChapterLinks(first, id, chapters, seen);
-
-      // Rewayat currently serves 24 chapters per page. We still continue
-      // until a page contains no new chapter links, so this also works if
-      // the page size changes.
-      const maxPages = expected > 0 ? Math.ceil(expected / 24) + 2 : 200;
-
-      for (let page = 2; page <= maxPages; page++) {
-        const pageDoc = await getDoc(
-          "/novel/" + encodeURIComponent(id) + "?page=" + page
-        );
-        const before = chapters.length;
-        extractChapterLinks(pageDoc, id, chapters, seen);
-
-        if (chapters.length === before) break;
-      }
-    } catch (e) {
-      // If the first request failed, preserve Harbor's normal error handling.
-      throw e;
-    }
-
-    // "9999" on some Rewayat pages is a non-chapter link/comment artifact.
-    // If the site gives us an official chapter count, never return that artifact.
-    if (expected > 0) {
-      const filtered = chapters.filter((c) => {
-        const n = Number(c.chapter);
-        return Number.isFinite(n) && n >= 1 && n <= expected;
+    function add(doc) {
+      doc.querySelectorAll("a").map((a) => {
+        const href = a.attr("href") || "";
+        const info = chapterInfo(href);
+        if (!info) return null;
+        let series = info.seriesId;
+        try { series = decodeURIComponent(series); } catch (_) {}
+        if (series !== slug || seen[info.path]) return null;
+        seen[info.path] = true;
+        chapters.push({
+          id: info.path,
+          chapter: info.number,
+          title: clean(a.text()) || ("الفصل " + info.number)
+        });
+        return null;
       });
-      chapters.length = 0;
-      chapters.push(...filtered);
     }
 
-    chapters.sort((a, b) => {
-      const na = Number(a.chapter);
-      const nb = Number(b.chapter);
-      if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
-      return a.title.localeCompare(b.title);
-    });
+    // Rewayat has 24 chapters per page. Read pages directly; do not depend
+    // on NUXT data or the Arabic chapter-count label.
+    for (let page = 1; page <= 200; page++) {
+      const path = page === 1
+        ? "/novel/" + encodeURIComponent(slug)
+        : "/novel/" + encodeURIComponent(slug) + "?page=" + page;
+      const doc = await getDoc(path);
+      const before = chapters.length;
+      add(doc);
+      if (chapters.length === before) break;
+    }
 
+    chapters.sort((a, b) => Number(a.chapter) - Number(b.chapter));
     return chapters.map((c, i) => ({
       id: c.id,
       chapter: c.chapter,
