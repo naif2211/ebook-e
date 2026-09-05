@@ -174,16 +174,22 @@ const plugin = {
   async chapters(id) {
     const chapters = [];
     const seen = {};
-    const slug = String(id || "").replace(/^\/+|\/+$/g, "");
+    const slug = String(id || "").replace(/^\\/+|\\/+$/g, "");
 
-    function add(doc) {
-      doc.querySelectorAll("a").map((a) => {
+    function addFromDoc(doc) {
+      doc.querySelectorAll("a[href]").map((a) => {
         const href = a.attr("href") || "";
         const info = chapterInfo(href);
         if (!info) return null;
+
         let series = info.seriesId;
         try { series = decodeURIComponent(series); } catch (_) {}
+
         if (series !== slug || seen[info.path]) return null;
+
+        const number = Number(info.number);
+        if (!Number.isFinite(number) || number < 1) return null;
+
         seen[info.path] = true;
         chapters.push({
           id: info.path,
@@ -194,20 +200,47 @@ const plugin = {
       });
     }
 
-    // Rewayat has 24 chapters per page. Read pages directly; do not depend
-    // on NUXT data or the Arabic chapter-count label.
-    for (let page = 1; page <= 200; page++) {
-      const path = page === 1
-        ? "/novel/" + encodeURIComponent(slug)
-        : "/novel/" + encodeURIComponent(slug) + "?page=" + page;
-      const doc = await getDoc(path);
-      const before = chapters.length;
-      add(doc);
-      if (chapters.length === before) break;
+    function chapterCount(doc) {
+      const text = clean(doc.querySelector("body")?.text() || doc.text() || "");
+      const m = text.match(/الفصول\\s*[（(]\\s*(\\d+)\\s*[）)]/u);
+      return m ? Number(m[1]) || 0 : 0;
     }
 
-    chapters.sort((a, b) => Number(a.chapter) - Number(b.chapter));
-    return chapters.map((c, i) => ({
+    const encodedSlug = encodeURIComponent(slug);
+    const first = await getDoc("/novel/" + encodedSlug);
+    const expected = chapterCount(first);
+
+    addFromDoc(first);
+
+    const pageSize = 24;
+    const maxPages = expected > 0
+      ? Math.ceil(expected / pageSize) + 2
+      : 200;
+
+    for (let page = 2; page <= maxPages; page++) {
+      const doc = await getDoc("/novel/" + encodedSlug + "?page=" + page);
+      const before = chapters.length;
+      addFromDoc(doc);
+
+      if (expected > 0 && chapters.length >= expected) break;
+      if (expected === 0 && chapters.length === before) break;
+    }
+
+    const filtered = expected > 0
+      ? chapters.filter((c) => {
+          const n = Number(c.chapter);
+          return Number.isFinite(n) && n >= 1 && n <= expected;
+        })
+      : chapters;
+
+    filtered.sort((a, b) => {
+      const na = Number(a.chapter);
+      const nb = Number(b.chapter);
+      if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+      return a.title.localeCompare(b.title);
+    });
+
+    return filtered.map((c, i) => ({
       id: c.id,
       chapter: c.chapter,
       title: c.title,
@@ -215,7 +248,7 @@ const plugin = {
       pages: 0,
       language: "ar"
     }));
-  },
+  }
 
   async content(chapterId) {
     const doc = await getDoc("/" + String(chapterId).replace(/^\/+/, ""));
