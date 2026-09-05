@@ -248,7 +248,7 @@ const plugin = {
       pages: 0,
       language: "ar"
     }));
-  }
+  },
 
   async content(chapterId) {
     const doc = await getDoc("/" + String(chapterId).replace(/^\/+/, ""));
