@@ -6,6 +6,7 @@
     {"id":"kolnovel","name":"KolNovel","version":"1.7.2","lang":"ar","nsfw":false,"icon":"https://kolnovel.com/favicon.ico","entry":"kolnovel.plugin.js"},
     {"id":"kolnovel2","name":"KolNovel 2","version":"1.0.0","lang":"ar","nsfw":false,"icon":"https://kolnovel.com/favicon.ico","entry":"kolnovel2.plugin.js"},
     {"id":"rewayat","name":"نادي الروايات","version":"1.0.2","lang":"ar","nsfw":false,"icon":"https://rewayat.club/favicon.ico","entry":"rewayat.plugin.js"},
-    {"id":"riwayatarab","name":"رواياتعرب","version":"1.6.0","lang":"ar","nsfw":false,"icon":"https://riwayatarab.com/favicon.ico","entry":"riwayatarab.plugin.js"}
+    {"id":"riwayatarab","name":"رواياتعرب","version":"1.6.0","lang":"ar","nsfw":false,"icon":"https://riwayatarab.com/favicon.ico","entry":"riwayatarab.plugin.js"},
+    {"id":"novelsparadise","name":"Novels Paradise","version":"1.0.0","lang":"ar","nsfw":false,"icon":"https://novelsparadise.site/favicon.ico","entry":"novelsparadise.plugin.js"}
   ]
 }
