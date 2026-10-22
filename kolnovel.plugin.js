@@ -52,7 +52,8 @@ function chapterId(url) {
 
 function isChapterUrl(url) {
   const absolute = abs(url) || "";
-  return /^https?:\/\/kolnovel\.com\/shaag[^/?#]*(?:[/?#]|$)/i.test(absolute);
+  // Accept both www/non-www and chapter slugs under the site's /shaag... route.
+  return /^https?:\/\/(?:www\.)?kolnovel\.com\/shaag[^?#]*(?:[?#].*)?$/i.test(absolute);
 }
 
 function card(link) {
@@ -161,27 +162,24 @@ const plugin = {
   async search(query, offset, tagId) {
     const q = clean(query);
     if (!q) return [];
-    const { order, status } = browseParams(tagId);
     const page = pageNumber(offset);
     const encoded = encodeURIComponent(q);
+    // The site's search form uses WordPress-style "s" queries; /series/?search=
+    // is not consistently honored and can return an empty or unfiltered page.
     const paths = [
+      "/?s=" + encoded + "&post_type=wp-manga&paged=" + page,
       "/?s=" + encoded + "&paged=" + page,
-      "/series/?search=" + encoded + "&page=" + page,
       "/series/?s=" + encoded + "&page=" + page,
+      "/series/?search=" + encoded + "&page=" + page,
       "/series/?searchTerm=" + encoded + "&page=" + page
     ];
-    const seen = {};
-    const out = [];
     for (const path of paths) {
       try {
         const found = mapSeriesResults(await getDoc(path));
-        for (const item of found) {
-          if (!seen[item.id]) { seen[item.id] = true; out.push(item); }
-        }
-        if (out.length) return out;
+        if (found.length) return found;
       } catch (_) {}
     }
-    return out;
+    return [];
   },
 
   async detail(id) {
