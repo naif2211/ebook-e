@@ -67,7 +67,7 @@ function summaryFromLink(a) {
   const title = titleFromCard(a);
   if (!title) return null;
 
-  const card = a.closest(".bs, .bsx, .utao, .item, article, .series-item") || a;
+  const card = a;
 
   return {
     id: pathOf(url).replace(/^\/series\//, "").replace(/\/$/, ""),
@@ -154,7 +154,7 @@ function extractChapters(doc) {
 
     seen.add(href);
 
-    const volume = text(a.closest("[data-volume], .volume, .chapter-group"));
+    const volume = text(a.querySelector("[data-volume], .volume, .chapter-group"));
 
     found.push({
       id: href,
@@ -262,4 +262,3 @@ const plugin = {
   }
 };
 
-return plugin;
