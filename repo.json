@@ -6,7 +6,7 @@
     {
       "id": "kolnovel",
       "name": "KolNovel",
-      "version": "1.7.2",
+      "version": "1.7.3",
       "lang": "ar",
       "nsfw": false,
       "icon": "https://kolnovel.com/favicon.ico",
@@ -47,15 +47,6 @@
       "nsfw": false,
       "icon": "https://novelsparadise.site/favicon.ico",
       "entry": "novelsparadise.plugin.js"
-    },
-    {
-      "id": "kolnovel-test",
-      "name": "KolNovel Test",
-      "version": "1.0.1",
-      "lang": "ar",
-      "nsfw": false,
-      "icon": "https://kolnovel.com/favicon.ico",
-      "entry": "kolnovel-test.plugin.js"
     }
   ]
 }
