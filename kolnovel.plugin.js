@@ -24,6 +24,7 @@ function seriesId(href) {
   try { return decodeURIComponent(m[1]); } catch (_) { return m[1]; }
 }
 function seriesPath(id) { return "/series/" + encodeURIComponent(id) + "/"; }
+function chapterArchivePath(id) { return "/shaag24category/" + encodeURIComponent(id) + "/"; }
 
 function chapterNumber(text) {
   const s = clean(text);
@@ -158,8 +159,29 @@ const plugin = {
   },
 
   async search(query, offset, tagId) {
+    const q = clean(query);
+    if (!q) return [];
     const { order, status } = browseParams(tagId);
-    return mapSeriesResults(await getDoc("/series/?search=" + encodeURIComponent(query) + "&order=" + encodeURIComponent(order) + "&page=" + pageNumber(offset) + "&status=" + encodeURIComponent(status) + "&type="));
+    const page = pageNumber(offset);
+    const encoded = encodeURIComponent(q);
+    const paths = [
+      "/?s=" + encoded + "&paged=" + page,
+      "/series/?search=" + encoded + "&page=" + page,
+      "/series/?s=" + encoded + "&page=" + page,
+      "/series/?searchTerm=" + encoded + "&page=" + page
+    ];
+    const seen = {};
+    const out = [];
+    for (const path of paths) {
+      try {
+        const found = mapSeriesResults(await getDoc(path));
+        for (const item of found) {
+          if (!seen[item.id]) { seen[item.id] = true; out.push(item); }
+        }
+        if (out.length) return out;
+      } catch (_) {}
+    }
+    return out;
   },
 
   async detail(id) {
@@ -177,7 +199,48 @@ const plugin = {
   },
 
   async chapters(id) {
-    return extractChapters(await getDoc(seriesPath(id)));
+    const collected = [];
+    const seen = {};
+    const addFrom = (doc) => {
+      for (const item of extractChapters(doc)) {
+        if (!seen[item.id]) { seen[item.id] = true; collected.push(item); }
+      }
+    };
+
+    try { addFrom(await getDoc(seriesPath(id))); } catch (_) {}
+
+    // KolNovel exposes a separate chapter-category archive for each series.
+    // The series page often contains only the first/latest links, so crawl
+    // archive pagination as well to recover the middle chapters.
+    const base = chapterArchivePath(id);
+    let emptyPages = 0;
+    for (let page = 1; page <= 80; page++) {
+      const paths = page === 1
+        ? [base]
+        : [base + "page/" + page + "/", base + "?paged=" + page];
+      let foundOnPage = false;
+      for (const path of paths) {
+        try {
+          const doc = await getDoc(path);
+          const before = collected.length;
+          addFrom(doc);
+          if (collected.length > before) foundOnPage = true;
+          if (foundOnPage) break;
+        } catch (_) {}
+      }
+      if (foundOnPage) emptyPages = 0;
+      else emptyPages++;
+      if (page > 1 && emptyPages >= 2) break;
+    }
+
+    collected.sort((a, b) => {
+      const an = Number(String(a.chapter).replace(/[^0-9.]/g, ""));
+      const bn = Number(String(b.chapter).replace(/[^0-9.]/g, ""));
+      if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn;
+      return a.position - b.position;
+    });
+    for (let i = 0; i < collected.length; i++) collected[i].position = i;
+    return collected;
   },
 
   async content(chapterId) {
