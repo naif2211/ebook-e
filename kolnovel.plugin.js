@@ -118,6 +118,38 @@ function extractChapters(doc) {
   return out;
 }
 
+function imageFrom(node) {
+  if (!node) return undefined;
+  return abs(
+    node.attr("data-src") ||
+    node.attr("data-lazy-src") ||
+    node.attr("data-original") ||
+    node.attr("data-cfsrc") ||
+    node.attr("src") ||
+    node.attr("content")
+  );
+}
+
+function findCover(doc) {
+  const selectors = [
+    ".series-cover img", ".book-cover img", ".summary_image img",
+    ".summary_img img", ".wp-post-image", ".series-thumb img",
+    ".post-thumbnail img", "figure img", "meta[property='og:image']",
+    "meta[name='twitter:image']"
+  ];
+  for (const selector of selectors) {
+    const node = doc.querySelector(selector);
+    const src = imageFrom(node);
+    if (src && !/placeholder|blank\.gif|no-image|default-cover/i.test(src)) return src;
+  }
+  // Fallback: select a likely cover image, not an arbitrary tiny site icon.
+  for (const node of doc.querySelectorAll("img[data-src], img[data-lazy-src], img[data-original], img[src]")) {
+    const src = imageFrom(node);
+    if (src && !/logo|avatar|icon|placeholder|blank\.gif|no-image/i.test(src)) return src;
+  }
+  return undefined;
+}
+
 function findContent(doc) {
   const selectors = [
     ".reading-content", ".chapter-content", ".entry-content", ".text-left",
@@ -185,11 +217,11 @@ const plugin = {
   async detail(id) {
     const doc = await getDoc(seriesPath(id));
     const title = clean(doc.querySelector("h1")?.text() || id);
-    const cover = doc.querySelector("img.wp-post-image, .series-cover img, .book-cover img, .summary_image img, img[data-src], img[src]");
+    const cover = findCover(doc);
     return {
       id,
       title,
-      cover: abs(cover?.attr("data-src") || cover?.attr("data-lazy-src") || cover?.attr("src")),
+      cover,
       description: clean(doc.querySelector(".description, .summary, .series-description, .desc")?.text()) || undefined,
       chapters: extractChapters(doc).length,
       siteUrl: BASE + seriesPath(id)
