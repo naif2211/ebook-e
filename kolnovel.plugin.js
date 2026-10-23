@@ -229,48 +229,38 @@ const plugin = {
   },
 
   async chapters(id) {
-    const collected = [];
+    // The series page itself contains the full chapter list on KolNovel.
+    // Avoid blind archive crawling: it creates dozens of slow requests and
+    // leaves Harbor showing an endless loading state.
+    const paths = [
+      seriesPath(id),
+      seriesPath(id) + "?amp",
+      seriesPath(id) + "?style=list"
+    ];
+    const merged = [];
     const seen = {};
-    const addFrom = (doc) => {
-      for (const item of extractChapters(doc)) {
-        if (!seen[item.id]) { seen[item.id] = true; collected.push(item); }
-      }
-    };
-
-    try { addFrom(await getDoc(seriesPath(id))); } catch (_) {}
-
-    // KolNovel exposes a separate chapter-category archive for each series.
-    // The series page often contains only the first/latest links, so crawl
-    // archive pagination as well to recover the middle chapters.
-    const base = chapterArchivePath(id);
-    let emptyPages = 0;
-    for (let page = 1; page <= 80; page++) {
-      const paths = page === 1
-        ? [base]
-        : [base + "page/" + page + "/", base + "?paged=" + page];
-      let foundOnPage = false;
-      for (const path of paths) {
-        try {
-          const doc = await getDoc(path);
-          const before = collected.length;
-          addFrom(doc);
-          if (collected.length > before) foundOnPage = true;
-          if (foundOnPage) break;
-        } catch (_) {}
-      }
-      if (foundOnPage) emptyPages = 0;
-      else emptyPages++;
-      if (page > 1 && emptyPages >= 2) break;
+    for (const path of paths) {
+      try {
+        const doc = await getDoc(path);
+        const found = extractChapters(doc);
+        for (const item of found) {
+          if (!seen[item.id]) {
+            seen[item.id] = true;
+            merged.push(item);
+          }
+        }
+        // If the page yielded a real chapter list, do not make extra requests.
+        if (merged.length > 2) break;
+      } catch (_) {}
     }
-
-    collected.sort((a, b) => {
-      const an = Number(String(a.chapter).replace(/[^0-9.]/g, ""));
-      const bn = Number(String(b.chapter).replace(/[^0-9.]/g, ""));
+    merged.sort((a, b) => {
+      const an = Number(String(a.chapter || "").replace(/[^0-9.]/g, ""));
+      const bn = Number(String(b.chapter || "").replace(/[^0-9.]/g, ""));
       if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn;
-      return a.position - b.position;
+      return 0;
     });
-    for (let i = 0; i < collected.length; i++) collected[i].position = i;
-    return collected;
+    for (let i = 0; i < merged.length; i++) merged[i].position = i;
+    return merged;
   },
 
   async content(chapterId) {
