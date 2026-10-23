@@ -32,6 +32,12 @@ function chapterNumber(text) {
   return m ? m[1] : undefined;
 }
 
+function volumeNumber(text) {
+  const s = clean(text);
+  const m = s.match(/(?:المجلد|مجلد|volume|vol\\.?)[\\s:#-]*(\\d+)/iu);
+  return m ? m[1] : undefined;
+}
+
 function chapterNumberFromUrl(url) {
   const s = String(url || "");
   const patterns = [
@@ -110,6 +116,7 @@ function extractChapters(doc) {
       id,
       chapter: number || String(out.length + 1),
       title: title || "الفصل " + (number || String(out.length + 1)),
+      volume,
       position: out.length,
       pages: 0,
       language: "ar"
@@ -233,19 +240,11 @@ const plugin = {
   },
 
   async chapters(id) {
-    // KolNovel renders a large chapter table directly on the series page.
-    // Read that page once and return the list; avoid slow speculative URL scans.
+    // KolNovel's series page contains the actual chapter archive, newest first.
+    // Extract the complete list from that page; do not fall back to a guessed
+    // list-mode URL, which can return an unrelated/empty page.
     const doc = await getDoc(seriesPath(id));
-    const found = extractChapters(doc);
-    if (found.length) return found;
-
-    // Only try the site's list-mode variant if the normal page has no chapters.
-    try {
-      const alternate = await getDoc("/series/list-mode/?series=" + encodeURIComponent(id));
-      return extractChapters(alternate);
-    } catch (_) {
-      return [];
-    }
+    return extractChapters(doc);
   },
 
   async content(chapterId) {
