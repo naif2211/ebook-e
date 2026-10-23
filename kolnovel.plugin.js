@@ -84,20 +84,46 @@ function mapSeriesResults(doc) {
 }
 
 function extractChapters(doc) {
-  const links = doc.querySelectorAll("a[href]");
   const out = [], seen = {};
+  const selectors = [
+    "table a[href]",
+    ".chapter-list a[href]",
+    ".chapters-list a[href]",
+    ".listing-chapters a[href]",
+    "a[href*='/shaag']",
+    "a[href*='/chapter/']",
+    "a[href*='chapter-']",
+    "a[href]"
+  ];
+  const links = [];
+  const linkSeen = {};
+  for (const selector of selectors) {
+    for (const a of doc.querySelectorAll(selector)) {
+      const href = a.attr("href") || "";
+      if (!href || linkSeen[href]) continue;
+      linkSeen[href] = true;
+      links.push(a);
+    }
+    if (links.length) break;
+  }
 
   for (const a of links) {
     const href = a.attr("href") || "";
     const absolute = abs(href);
-    if (!absolute || !isChapterUrl(absolute)) continue;
-
-    const id = chapterId(absolute);
-    if (!id || seen[id]) continue;
+    if (!absolute || !/^https?:\/\/(?:www\.)?kolnovel\.com\//i.test(absolute)) continue;
+    if (/\/series\//i.test(absolute) || /\/genre\//i.test(absolute) || /\/tag\//i.test(absolute)) continue;
 
     const title = clean(a.text()) || clean(a.attr("title")) || clean(a.attr("aria-label"));
     const number = chapterNumber(title) || chapterNumberFromUrl(absolute);
+    // Accept the site's actual chapter links even if its route prefix changes,
+    // but require a chapter number or a chapter-like label to avoid menu links.
+    const chapterLike = /(?:الفصل|فصل|chapter|ch\.?)/iu.test(title) ||
+      /\/(?:shaag|chapter|chap)[^/]*\//i.test(absolute) ||
+      /(?:chapter|chap|ch)[-_]?\d+/i.test(absolute);
+    if (!chapterLike || (!number && !/(?:الفصل|فصل|chapter|ch\.?)/iu.test(title))) continue;
 
+    const id = chapterId(absolute);
+    if (!id || seen[id]) continue;
     seen[id] = true;
     out.push({
       id,
@@ -110,7 +136,8 @@ function extractChapters(doc) {
   }
 
   out.sort((a, b) => {
-    const an = Number(a.chapter), bn = Number(b.chapter);
+    const an = Number(String(a.chapter).replace(/[^0-9.]/g, ""));
+    const bn = Number(String(b.chapter).replace(/[^0-9.]/g, ""));
     if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn;
     return a.position - b.position;
   });
@@ -196,19 +223,27 @@ const plugin = {
     if (!q) return [];
     const page = pageNumber(offset);
     const encoded = encodeURIComponent(q);
-    // The site's search form uses WordPress-style "s" queries; /series/?search=
-    // is not consistently honored and can return an empty or unfiltered page.
+    // KolNovel's catalogue lives at /series/. Try its catalogue search first.
+    // The home page can still render unrelated popular series for an unknown
+    // query, so never treat an unfiltered home-page result as a successful search.
     const paths = [
-      "/?s=" + encoded + "&post_type=wp-manga&paged=" + page,
-      "/?s=" + encoded + "&paged=" + page,
-      "/series/?s=" + encoded + "&page=" + page,
       "/series/?search=" + encoded + "&page=" + page,
-      "/series/?searchTerm=" + encoded + "&page=" + page
+      "/series/?searchTerm=" + encoded + "&page=" + page,
+      "/series/?s=" + encoded + "&page=" + page,
+      "/?s=" + encoded + "&paged=" + page
     ];
-    for (const path of paths) {
+    for (let i = 0; i < paths.length; i++) {
       try {
-        const found = mapSeriesResults(await getDoc(path));
-        if (found.length) return found;
+        const doc = await getDoc(paths[i]);
+        const found = mapSeriesResults(doc);
+        if (!found.length) continue;
+        if (i === paths.length - 1) {
+          const qLower = q.toLocaleLowerCase();
+          const matched = found.filter(x => clean(x.title).toLocaleLowerCase().includes(qLower));
+          if (matched.length) return matched;
+          continue;
+        }
+        return found;
       } catch (_) {}
     }
     return [];
@@ -229,38 +264,19 @@ const plugin = {
   },
 
   async chapters(id) {
-    // The series page itself contains the full chapter list on KolNovel.
-    // Avoid blind archive crawling: it creates dozens of slow requests and
-    // leaves Harbor showing an endless loading state.
-    const paths = [
-      seriesPath(id),
-      seriesPath(id) + "?amp",
-      seriesPath(id) + "?style=list"
-    ];
-    const merged = [];
-    const seen = {};
-    for (const path of paths) {
-      try {
-        const doc = await getDoc(path);
-        const found = extractChapters(doc);
-        for (const item of found) {
-          if (!seen[item.id]) {
-            seen[item.id] = true;
-            merged.push(item);
-          }
-        }
-        // If the page yielded a real chapter list, do not make extra requests.
-        if (merged.length > 2) break;
-      } catch (_) {}
+    // KolNovel renders a large chapter table directly on the series page.
+    // Read that page once and return the list; avoid slow speculative URL scans.
+    const doc = await getDoc(seriesPath(id));
+    const found = extractChapters(doc);
+    if (found.length) return found;
+
+    // Only try the site's list-mode variant if the normal page has no chapters.
+    try {
+      const alternate = await getDoc("/series/list-mode/?series=" + encodeURIComponent(id));
+      return extractChapters(alternate);
+    } catch (_) {
+      return [];
     }
-    merged.sort((a, b) => {
-      const an = Number(String(a.chapter || "").replace(/[^0-9.]/g, ""));
-      const bn = Number(String(b.chapter || "").replace(/[^0-9.]/g, ""));
-      if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn;
-      return 0;
-    });
-    for (let i = 0; i < merged.length; i++) merged[i].position = i;
-    return merged;
   },
 
   async content(chapterId) {
