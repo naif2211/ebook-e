@@ -84,30 +84,12 @@ function mapSeriesResults(doc) {
 }
 
 function extractChapters(doc) {
-  const out = [], seen = {};
-  const selectors = [
-    "table a[href]",
-    ".chapter-list a[href]",
-    ".chapters-list a[href]",
-    ".listing-chapters a[href]",
-    "a[href*='/shaag']",
-    "a[href*='/chapter/']",
-    "a[href*='chapter-']",
-    "a[href]"
-  ];
-  const links = [];
-  const linkSeen = {};
-  for (const selector of selectors) {
-    for (const a of doc.querySelectorAll(selector)) {
-      const href = a.attr("href") || "";
-      if (!href || linkSeen[href]) continue;
-      linkSeen[href] = true;
-      links.push(a);
-    }
-    if (links.length) break;
-  }
-
-  for (const a of links) {
+  const out = [];
+  const seen = {};
+  // Important: inspect ALL anchors. A previous version stopped as soon as
+  // it found any table/list anchors, even if they were only author/category
+  // links, so it never reached the actual chapter links farther down the page.
+  for (const a of doc.querySelectorAll("a[href]")) {
     const href = a.attr("href") || "";
     const absolute = abs(href);
     if (!absolute || !/^https?:\/\/(?:www\.)?kolnovel\.com\//i.test(absolute)) continue;
@@ -115,12 +97,11 @@ function extractChapters(doc) {
 
     const title = clean(a.text()) || clean(a.attr("title")) || clean(a.attr("aria-label"));
     const number = chapterNumber(title) || chapterNumberFromUrl(absolute);
-    // Accept the site's actual chapter links even if its route prefix changes,
-    // but require a chapter number or a chapter-like label to avoid menu links.
-    const chapterLike = /(?:الفصل|فصل|chapter|ch\.?)/iu.test(title) ||
-      /\/(?:shaag|chapter|chap)[^/]*\//i.test(absolute) ||
-      /(?:chapter|chap|ch)[-_]?\d+/i.test(absolute);
-    if (!chapterLike || (!number && !/(?:الفصل|فصل|chapter|ch\.?)/iu.test(title))) continue;
+    const textLooksLikeChapter = /(?:الفصل|فصل|chapter|ch\.?)[\s:#-]*\d+/iu.test(title);
+    const urlLooksLikeChapter = /\/(?:shaag|chapter|chap)[^/]*(?:\/|$)/i.test(absolute) ||
+      /(?:chapter|chap|ch)[-_ ]?\d+/i.test(absolute);
+    if (!textLooksLikeChapter && !urlLooksLikeChapter) continue;
+    if (!number && !textLooksLikeChapter) continue;
 
     const id = chapterId(absolute);
     if (!id || seen[id]) continue;
@@ -136,25 +117,13 @@ function extractChapters(doc) {
   }
 
   out.sort((a, b) => {
-    const an = Number(String(a.chapter).replace(/[^0-9.]/g, ""));
-    const bn = Number(String(b.chapter).replace(/[^0-9.]/g, ""));
+    const an = Number(String(a.chapter || "").replace(/[^0-9.]/g, ""));
+    const bn = Number(String(b.chapter || "").replace(/[^0-9.]/g, ""));
     if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn;
     return a.position - b.position;
   });
   for (let i = 0; i < out.length; i++) out[i].position = i;
   return out;
-}
-
-function imageFrom(node) {
-  if (!node) return undefined;
-  return abs(
-    node.attr("data-src") ||
-    node.attr("data-lazy-src") ||
-    node.attr("data-original") ||
-    node.attr("data-cfsrc") ||
-    node.attr("src") ||
-    node.attr("content")
-  );
 }
 
 function findCover(doc) {
