@@ -1,17 +1,16 @@
-// Harbor eBook source plugin: رواياتعرب (RiwayatArab) - https://riwayatarab.com
+// Harbor eBook source plugin for رواياتعرب (riwayatarab.com).
 //
-// The site is a Next.js app. These pages are server-rendered, so plain HTML works:
-//   /latest?page=N                      20 novel cards per page (37 pages)
-//   /novel/<slug>                       novel page (cover, author, synopsis)
-//   /novel/<slug>/chapters?page=N       50 chapter links per page, ascending
-//   /novel/<slug>/chapter/<n>           chapter text
-// /search is filled in by JavaScript, so search() below is a best guess (see VERIFY).
+// Verified from the live site: URL structure, pagination, chapter-list paging, and the
+// watermark lines inside chapters. Written from the rendered page text, NOT the raw HTML:
+// the CSS class names are unknown, so selectors are anchor-href based with text parsing.
+// Lines marked CHECK are the ones most likely to need adjusting after a first test run.
 
 const BASE = "https://riwayatarab.com";
-const PAGE_SIZE = 20;
+const PAGE = 20; // /latest shows 20 novels per page
+const CH_PAGE = 50; // /novel/<slug>/chapters shows 50 chapters per page
 
 async function getDoc(path) {
-  const res = await harbor.http(path.startsWith("http") ? path : BASE + path, { responseType: "text" });
+  const res = await harbor.http(BASE + path, { responseType: "text" });
   if (!res.ok) throw new Error("http " + res.status + " for " + path);
   return harbor.parseHtml(res.body);
 }
@@ -24,141 +23,196 @@ function abs(url) {
   return BASE + "/" + url;
 }
 
-function safeDecode(s) {
-  try { return decodeURIComponent(s); } catch (_) { return s; }
-}
-function clean(s) {
-  return (s || "").replace(/\s+/g, " ").trim();
-}
-function slugFromHref(href) {
-  const m = (href || "").match(/\/novel\/([^/?#]+)/);
-  return m ? safeDecode(m[1]) : "";
-}
-function novelPath(slug) {
-  return "/novel/" + encodeURIComponent(slug);
-}
-function mapStatus(text) {
-  if (/مكتملة/.test(text || "")) return "completed";
-  if (/متوقفة/.test(text || "")) return "hiatus";
-  if (/مستمرة/.test(text || "")) return "ongoing";
-  return undefined;
+const STATUS = { "مستمرة": "ongoing", "مكتملة": "completed", "متوقفة": "hiatus" };
+const STATUS_RE = /(مستمرة|مكتملة|متوقفة)/;
+
+const stripMarks = (s) => (s || "").replace(/[\u064B-\u065F\u0670\u0640]/g, "");
+
+// Novel cards on /latest: one <a href="/novel/<slug>"> whose text is
+// "<title> <status> <title> بقلم: <author> <synopsis> <genre> <views> <chapters> 0 آخر تحديث: <date>"
+function cardToSummary(a) {
+  const href = a.attr("href") || "";
+  if (!/^\/novel\/[^/]+\/?$/.test(href)) return null;
+  const text = (a.text() || "").replace(/\s+/g, " ").trim();
+  if (!text) return null;
+
+  const st = text.match(STATUS_RE);
+  let title = st ? text.slice(0, st.index) : text.split("بقلم:")[0];
+  title = title.trim();
+  if (!title) return null;
+
+  const tail = text.match(/([\d.,]+\s?[كKM]?)\s+(\d+)\s+\d+\s+آخر تحديث/);
+  const img = a.querySelector("img");
+
+  return {
+    id: href.replace(/^\/novel\//, "").replace(/\/$/, ""),
+    title,
+    cover: abs(img?.attr("src")), // CHECK: cards may carry no <img>; detail() always fills the cover
+    status: st ? STATUS[st[1]] : undefined,
+    chapters: tail ? Number(tail[2]) || undefined : undefined,
+    trendingScore: undefined,
+    isFanMade: false,
+  };
 }
 
-// Card text looks like: "<title> <status> <title> بقلم: <author> <synopsis> <genre> <views> ..."
-// There are no class names in the rendered text, so cards are found by their link.
-function parseCards(doc) {
-  const out = [];
+async function latestPage(page) {
+  const doc = await getDoc("/latest?page=" + page);
   const seen = new Set();
-  doc.querySelectorAll("a[href*='/novel/']").forEach((a) => {
-    const href = a.attr("href") || "";
-    if (/\/chapter\/|\/chapters/.test(href)) return;
-    const id = slugFromHref(href);
-    if (!id || seen.has(id)) return;
-    const text = clean(a.text());
-    const m = text.match(/^(.*?)\s+(مستمرة|مكتملة|متوقفة)\s/);
-    if (!m) return; // navigation links have no status word
-    seen.add(id);
-    const img = a.querySelector("img");
-    out.push({
-      id,
-      title: clean(m[1]),
-      status: mapStatus(m[2]),
-      cover: abs(img?.attr("src")),
-    });
-  });
+  const out = [];
+  for (const a of doc.querySelectorAll("a")) {
+    const s = cardToSummary(a);
+    if (s && !seen.has(s.id)) {
+      seen.add(s.id);
+      out.push(s);
+    }
+  }
   return out;
+}
+
+// Chapter body: keep DOM order, drop the site's injected watermark / promo lines.
+function isJunk(line) {
+  const flat = line.replace(/[\s*_\-]/g, "");
+  return (
+    /حقوق\$\$.*\$\$/.test(flat) ||
+    /عالمالروايات/.test(flat) ||
+    /kol?no?vel/i.test(flat) ||
+    /مو.?قع.?ملوك/.test(flat) ||
+    /موقعكالمفضللقراءة/.test(flat) ||
+    /جميعالحقوقمحفوظة/.test(flat)
+  );
 }
 
 const plugin = {
   id: "riwayatarab",
   name: "رواياتعرب",
 
-  // "Latest updates" is the only server-rendered listing, so it doubles as popular.
-  async popular(offset) {
-    const page = Math.floor(offset / PAGE_SIZE) + 1;
-    return parseCards(await getDoc("/latest?page=" + page));
+  // /latest is server-rendered. /search?sort=views is client-rendered, so it can't be scraped.
+  async popular(offset, tagId) {
+    const page = Math.floor(offset / PAGE) + 1;
+    return latestPage(page);
   },
 
-  // VERIFY: /search is client-rendered, so this param name is a guess. If it returns
-  // nothing, open DevTools > Network on /search, type a word, and send me that request.
-  async search(query, offset) {
-    const page = Math.floor(offset / PAGE_SIZE) + 1;
-    return parseCards(await getDoc("/search?q=" + encodeURIComponent(query) + "&page=" + page));
+  // /search is client-rendered (empty HTML), so there is no HTML to parse. Fallback: scan
+  // /latest pages (37 of them, ~740 novels) in small parallel batches and filter by title.
+  // Replace this once you find the JSON endpoint the search page calls (DevTools > Network).
+  async search(query, offset, tagId) {
+    if (offset > 0) return []; // all matches are returned on the first call
+    const q = stripMarks(query).toLowerCase().trim();
+    if (!q) return [];
+    const doc1 = await getDoc("/latest");
+    const last = Math.max(
+      1,
+      ...doc1
+        .querySelectorAll("a")
+        .map((a) => (a.attr("href") || "").match(/^\/latest\?page=(\d+)/))
+        .filter(Boolean)
+        .map((m) => Number(m[1])),
+    );
+    const hits = [];
+    const seen = new Set();
+    for (let start = 1; start <= last; start += 6) {
+      const batch = [];
+      for (let p = start; p < start + 6 && p <= last; p++) batch.push(latestPage(p).catch(() => []));
+      for (const list of await Promise.all(batch)) {
+        for (const s of list) {
+          if (!seen.has(s.id) && stripMarks(s.title).toLowerCase().includes(q)) {
+            seen.add(s.id);
+            hits.push(s);
+          }
+        }
+      }
+    }
+    return hits;
   },
 
   async detail(id) {
-    const doc = await getDoc(novelPath(id));
-    const h1 = doc.querySelector("h1");
-    if (!h1) return null;
-    const title = clean(h1.text());
-    const body = clean(doc.querySelector("body")?.text() || "");
+    const doc = await getDoc("/novel/" + id);
+    const title = doc.querySelector("h1")?.text()?.trim();
+    if (!title) return null;
+    const body = ((doc.querySelector("body") || doc).text?.() || "").replace(/\s+/g, " ");
 
-    const author = body.match(/بقلم:\s*(.+?)\s+[\d.,]+\S*\s*مشاهدة/)?.[1];
-    const chapters = body.match(/(\d+)\s*فصل/)?.[1];
-    const synopsis = body.match(/نبذة عن الرواية\s*([\s\S]*?)\s*قائمة الفصول/)?.[1];
-    const cover = doc.querySelector("img[src*='/uploads/covers/']") || doc.querySelector("img[alt='" + title.replace(/'/g, "") + "']");
+    const st = body.match(STATUS_RE);
+    const author = body.match(/بقلم:\s*(.+?)\s+[\d.,]+\s?[كKM]?\s*مشاهدة/)?.[1]?.trim();
+    const total = body.match(/(\d+)\s*فصل/)?.[1];
+    // CHECK: if text() collapses differently, fall back to the (truncated) meta description.
+    const description =
+      body.match(/نبذة عن الرواية\s*(.+?)\s*قائمة الفصول/)?.[1]?.trim() ||
+      doc.querySelector("meta[name='description']")?.attr("content");
+
+    const imgs = doc.querySelectorAll("img");
+    const poster = imgs.find((i) => (i.attr("alt") || "").trim() === title) || imgs[0];
+    const cover =
+      abs(poster?.attr("src")) || abs(doc.querySelector("meta[property='og:image']")?.attr("content"));
+
+    const genres = doc
+      .querySelectorAll("a")
+      .filter((a) => (a.attr("href") || "").includes("/search?category="))
+      .map((a) => a.text().trim())
+      .filter(Boolean);
 
     return {
       id,
       title,
-      cover: abs(cover?.attr("src")),
-      description: clean(synopsis) || undefined,
-      author: author && author !== "غير محدد" ? clean(author) : undefined,
-      status: mapStatus(body.slice(0, body.indexOf("بقلم") > 0 ? body.indexOf("بقلم") : 400)),
-      chapters: chapters ? Number(chapters) : undefined,
+      cover,
+      description,
+      status: st ? STATUS[st[1]] : undefined,
+      author: author && author !== "غير محدد" ? author : undefined, // "غير محدد" = "unspecified"
+      chapters: total ? Number(total) : undefined,
       originalLanguage: "ar",
-      genres: doc.querySelectorAll("a[href*='/search?category=']").map((a) => clean(a.text())).filter(Boolean).slice(0, 5),
+      genres,
     };
   },
 
-  // Chapter pages are 50 links each, ascending: /novel/<slug>/chapters?page=N
-  // Chapter id = "<slug>::<number>".
+  // /novel/<slug>/chapters?page=N, 50 per page, ascending by default.
   async chapters(id) {
+    const first = await getDoc("/novel/" + id + "/chapters");
+    const pageCount = Math.max(
+      1,
+      Number(((first.querySelector("body") || first).text?.() || "").match(/الصفحة\s*\d+\s*من\s*(\d+)/)?.[1]) || 1,
+    );
+
+    const docs = [first];
+    for (let start = 2; start <= pageCount; start += 6) {
+      const batch = [];
+      for (let p = start; p < start + 6 && p <= pageCount; p++) {
+        batch.push(getDoc("/novel/" + id + "/chapters?page=" + p));
+      }
+      docs.push(...(await Promise.all(batch)));
+    }
+
     const out = [];
     const seen = new Set();
-    let totalPages = 0;
-    for (let page = 1; page <= 300; page++) {
-      const doc = await getDoc(novelPath(id) + "/chapters" + (page > 1 ? "?page=" + page : ""));
-      if (!totalPages) {
-        const m = clean(doc.querySelector("body")?.text() || "").match(/الصفحة\s*\d+\s*من\s*(\d+)/);
-        totalPages = m ? Number(m[1]) : 0;
-      }
-      const before = out.length;
-      doc.querySelectorAll("a[href*='/chapter/']").forEach((a) => {
+    for (const doc of docs) {
+      for (const a of doc.querySelectorAll("a")) {
         const href = a.attr("href") || "";
-        const num = href.match(/\/chapter\/([^/?#]+)/)?.[1];
-        if (!num || seen.has(num)) return;
-        seen.add(num);
-        const text = clean(a.text());
-        const views = text.replace(/^.*الفصل\s*[\d.]+\s*/, "").trim(); // trailing view count
+        const m = href.match(/^\/novel\/[^/]+\/chapter\/(\d+)\/?$/);
+        if (!m || seen.has(href)) continue;
+        seen.add(href);
+        const text = (a.text() || "").replace(/\s+/g, " ").trim();
+        // Text is "الفصل 12الفصل 12 75": label twice, then the view count.
+        const views = text.match(/\s(\d[\d.,]*\s?[كKM]?)$/)?.[1];
         out.push({
-          id: id + "::" + safeDecode(num),
-          chapter: safeDecode(num),
+          id: href.replace(/^\//, ""),
+          chapter: m[1],
           position: out.length,
-          title: "الفصل " + safeDecode(num),
+          title: "الفصل " + m[1],
           pages: 0,
           language: "ar",
-          views: /^[\d.,]+[كم]?$/.test(views) ? views : undefined,
+          views: views || undefined,
         });
-      });
-      if (out.length === before) break;
-      if (totalPages && page >= totalPages) break;
+      }
     }
     return out;
   },
 
-  // VERIFY: paragraph container unknown. Tries article/main <p>, then every <p>.
-  // The site injects watermark lines ("حقوق ... عالم الروايات ...") between paragraphs;
-  // those exact spam lines are dropped, everything else stays in source order.
   async content(chapterId) {
-    const [slug, num] = chapterId.split("::");
-    const doc = await getDoc(novelPath(slug) + "/chapter/" + encodeURIComponent(num));
-    let blocks = doc.querySelectorAll("article p, main p");
-    if (blocks.length < 3) blocks = doc.querySelectorAll("p");
-    const spam = /عالم الروايات|الموقع الرسمي|المحتوى المسروق|المترجم بقراءة|رواياتعرب|جميع الحقوق محفوظة/;
-    return blocks
-      .map((n) => n.text().trim())
-      .filter((t) => t && !spam.test(t))
-      .join("\n\n");
+    const doc = await getDoc("/" + chapterId);
+    // CHECK: assumes prose is in <p>. If a chapter comes back empty, inspect the real container.
+    const scope = doc.querySelector("article") || doc.querySelector("main") || doc;
+    let lines = scope.querySelectorAll("p").map((p) => p.text().trim());
+    if (!lines.some(Boolean)) {
+      lines = (scope.text() || "").split(/\n+/).map((l) => l.trim());
+    }
+    return lines.filter((l) => l && !isJunk(l)).join("\n\n");
   },
 };
