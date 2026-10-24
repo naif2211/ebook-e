@@ -23,6 +23,24 @@ function abs(url) {
   return BASE + "/" + url;
 }
 
+// Hrefs may be relative or absolute (https://riwayatarab.com/...). Always reduce to a path.
+function path(href) {
+  return (href || "").replace(/^https?:\/\/[^/]+/i, "").replace(/#.*$/, "");
+}
+
+// Fetch with retries so one flaky request does not wipe out a whole list.
+async function getDocRetry(p, tries = 3) {
+  let err;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await getDoc(p);
+    } catch (e) {
+      err = e;
+    }
+  }
+  throw err;
+}
+
 const STATUS = { "مستمرة": "ongoing", "مكتملة": "completed", "متوقفة": "hiatus" };
 const STATUS_RE = /(مستمرة|مكتملة|متوقفة)/;
 
@@ -31,8 +49,8 @@ const stripMarks = (s) => (s || "").replace(/[\u064B-\u065F\u0670\u0640]/g, "");
 // Novel cards on /latest: one <a href="/novel/<slug>"> whose text is
 // "<title> <status> <title> بقلم: <author> <synopsis> <genre> <views> <chapters> 0 آخر تحديث: <date>"
 function cardToSummary(a) {
-  const href = a.attr("href") || "";
-  if (!/^\/novel\/[^/]+\/?$/.test(href)) return null;
+  const href = path(a.attr("href"));
+  if (!/^\/novel\/[^/?]+\/?$/.test(href)) return null;
   const text = (a.text() || "").replace(/\s+/g, " ").trim();
   if (!text) return null;
 
@@ -56,7 +74,7 @@ function cardToSummary(a) {
 }
 
 async function latestPage(page) {
-  const doc = await getDoc("/latest?page=" + page);
+  const doc = await getDocRetry("/latest?page=" + page);
   const seen = new Set();
   const out = [];
   for (const a of doc.querySelectorAll("a")) {
@@ -104,7 +122,7 @@ const plugin = {
       1,
       ...doc1
         .querySelectorAll("a")
-        .map((a) => (a.attr("href") || "").match(/^\/latest\?page=(\d+)/))
+        .map((a) => path(a.attr("href")).match(/^\/latest\?page=(\d+)/))
         .filter(Boolean)
         .map((m) => Number(m[1])),
     );
@@ -146,7 +164,7 @@ const plugin = {
 
     const genres = doc
       .querySelectorAll("a")
-      .filter((a) => (a.attr("href") || "").includes("/search?category="))
+      .filter((a) => path(a.attr("href")).includes("/search?category="))
       .map((a) => a.text().trim())
       .filter(Boolean);
 
@@ -165,44 +183,52 @@ const plugin = {
 
   // /novel/<slug>/chapters?page=N, 50 per page, ascending by default.
   async chapters(id) {
-    const first = await getDoc("/novel/" + id + "/chapters");
-    const pageCount = Math.max(
-      1,
-      Number(((first.querySelector("body") || first).text?.() || "").match(/الصفحة\s*\d+\s*من\s*(\d+)/)?.[1]) || 1,
-    );
+    const base = "/novel/" + id;
+    const first = await getDocRetry(base + "/chapters");
+    const firstText = ((first.querySelector("body") || first).text?.() || "").replace(/\s+/g, " ");
+    const pageCount = Math.max(1, Number(firstText.match(/الصفحة\s*\d+\s*من\s*(\d+)/)?.[1]) || 1);
+    const total = Number(firstText.match(/(\d+)\s*فصل/)?.[1]) || 0;
 
     const docs = [first];
-    for (let start = 2; start <= pageCount; start += 6) {
-      const batch = [];
-      for (let p = start; p < start + 6 && p <= pageCount; p++) {
-        batch.push(getDoc("/novel/" + id + "/chapters?page=" + p));
+    for (let p = 2; p <= pageCount; p++) {
+      try {
+        docs.push(await getDocRetry(base + "/chapters?page=" + p));
+      } catch (e) {
+        // skip a failed page; the fallback below fills any gap
       }
-      docs.push(...(await Promise.all(batch)));
     }
 
-    const out = [];
-    const seen = new Set();
+    const byNum = new Map();
     for (const doc of docs) {
       for (const a of doc.querySelectorAll("a")) {
-        const href = a.attr("href") || "";
-        const m = href.match(/^\/novel\/[^/]+\/chapter\/(\d+)\/?$/);
-        if (!m || seen.has(href)) continue;
-        seen.add(href);
+        const href = path(a.attr("href"));
+        const m = href.match(/\/chapter\/(\d+)\/?$/);
+        if (!m) continue;
+        const n = Number(m[1]);
+        if (byNum.has(n)) continue;
         const text = (a.text() || "").replace(/\s+/g, " ").trim();
-        // Text is "الفصل 12الفصل 12 75": label twice, then the view count.
         const views = text.match(/\s(\d[\d.,]*\s?[كKM]?)$/)?.[1];
-        out.push({
-          id: href.replace(/^\//, ""),
-          chapter: m[1],
-          position: out.length,
-          title: "الفصل " + m[1],
-          pages: 0,
-          language: "ar",
-          views: views || undefined,
-        });
+        byNum.set(n, { n, id: href.replace(/^\//, ""), views });
       }
     }
-    return out;
+
+    // Fallback: chapter URLs are predictable (/novel/<slug>/chapter/<n>), so fill gaps / empty lists.
+    const max = Math.max(total, ...byNum.keys(), 0);
+    for (let n = 1; n <= max; n++) {
+      if (!byNum.has(n)) byNum.set(n, { n, id: "novel/" + id + "/chapter/" + n });
+    }
+
+    return [...byNum.values()]
+      .sort((x, y) => x.n - y.n)
+      .map((c, position) => ({
+        id: c.id,
+        chapter: String(c.n),
+        position,
+        title: "الفصل " + c.n,
+        pages: 0,
+        language: "ar",
+        views: c.views || undefined,
+      }));
   },
 
   async content(chapterId) {
