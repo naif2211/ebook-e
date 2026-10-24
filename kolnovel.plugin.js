@@ -165,48 +165,58 @@ const plugin = {
     };
   },
 
-  // The chapter table is empty in the server HTML (filled by JS), so this tries, in order:
-  //   1. rows already present in the page
-  //   2. the paged URL the site itself links to (?chapter_volume&chapter_page=N#chapters)
-  //   3. walking first chapter -> next links (slow, last resort)
+  // The chapter table is empty in the server HTML (filled by JS); only the first and
+  // last chapter links are present. So:
+  //   1. read the expected count and the first/last links from the series page
+  //   2. try the paged URLs / any rows present
+  //   3. if fewer chapters than expected were found, walk first -> next -> ... -> last
   async chapters(id) {
     const out = [];
     const seen = new Set();
-    const push = (a) => {
-      const href = a.attr("href") || "";
-      if (!href || seen.has(href) || /\/series\/|\/genre\/|\/type\/|\/writer\/|\/translators\//.test(href)) return;
-      if (!/الفصل/.test(a.text() || "") ) return;
+    const isChapterHref = (href) =>
+      href && !/\/series\/|\/genre\/|\/type\/|\/writer\/|\/translators\/|\/login|\/library|\/offline|\/account|\/customize|#/.test(href);
+    const push = (href, label) => {
+      if (!isChapterHref(href) || seen.has(href)) return;
       seen.add(href);
-      const { chapter, title } = parseChapterLabel(a.text());
-      out.push({
-        id: chapterIdFromHref(href),
-        chapter,
-        position: out.length,
-        title,
-        pages: 0,
-        language: "ar",
-      });
+      const { chapter, title } = parseChapterLabel(label);
+      out.push({ id: chapterIdFromHref(href), chapter, position: out.length, title, pages: 0, language: "ar" });
     };
 
-    for (let page = 1; page <= 60; page++) {
-      const suffix = page === 1 ? "" : "?chapter_volume&chapter_page=" + page;
-      const doc = await getDoc(seriesPath(id) + suffix);
-      const before = out.length;
-      doc.querySelectorAll("#chapters a, table a, [class*='chapter'] a").forEach(push);
-      if (out.length === before) break; // nothing new: last page (or JS-only list)
-    }
-    if (out.length) return out;
+    const main = await getDoc(seriesPath(id));
+    const expected = Number((main.querySelector("main")?.text() || "").match(/الفصول\s*(\d+)/)?.[1]) || 0;
+    const links = main.querySelectorAll("a").filter((a) => /الفصل/.test(a.text() || "") && isChapterHref(a.attr("href")));
+    const firstHref = links[0]?.attr("href");
+    const lastHref = links[links.length - 1]?.attr("href");
 
-    // Fallback: follow "next" links from the "ابدأ القراءة" button.
-    const first = (await getDoc(seriesPath(id))).querySelector("a[href*='shaag24'], a[href*='/ابدأ']");
-    let href = first?.attr("href");
-    for (let i = 0; href && i < 2000 && !seen.has(href); i++) {
-      seen.add(href);
-      const doc = await getDoc(href);
-      const { chapter, title } = parseChapterLabel(doc.querySelector("h1")?.text() || "");
-      out.push({ id: chapterIdFromHref(href), chapter, position: out.length, title, pages: 0, language: "ar" });
-      href = doc.querySelector("a[rel='next']")?.attr("href"); // VERIFY next-link selector
+    // Step 2: rows present in the page or in the paged URLs.
+    for (let page = 1; page <= 60; page++) {
+      const doc = page === 1 ? main : await getDoc(seriesPath(id) + "?chapter_volume&chapter_page=" + page);
+      const before = out.length;
+      doc.querySelectorAll("a").forEach((a) => {
+        if (/الفصل/.test(a.text() || "")) push(a.attr("href"), a.text());
+      });
+      if (out.length === before) break;
     }
+    if (out.length >= Math.max(expected, 3)) return out;
+
+    // Step 3: walk the next-chapter chain. Sequential by nature, so it is slow.
+    out.length = 0;
+    seen.clear();
+    let href = firstHref;
+    for (let i = 0; href && i < 3000 && !seen.has(href); i++) {
+      const doc = await getDoc(href);
+      const heading = doc.querySelector("h1")?.text() || doc.querySelector("title")?.text() || "";
+      push(href, heading);
+      if (href === lastHref) break;
+      const anchors = doc.querySelectorAll("a");
+      const next =
+        doc.querySelector("a[rel='next']") ||
+        doc.querySelector("a[class*='next']") ||
+        anchors.find((a) => /التالي/.test(a.text() || "") && isChapterHref(a.attr("href")));
+      href = next?.attr("href");
+    }
+    // Make sure the last chapter is present even if the chain broke early.
+    if (lastHref && !seen.has(lastHref)) push(lastHref, "");
     return out;
   },
 
