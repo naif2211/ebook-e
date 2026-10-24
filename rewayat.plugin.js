@@ -1,206 +1,164 @@
-// Rewayat.club - Harbor eBook Source
-const BASE = "https://rewayat.club";
+// Harbor eBook source plugin: رواياتعرب (RiwayatArab) - https://riwayatarab.com
+//
+// The site is a Next.js app. These pages are server-rendered, so plain HTML works:
+//   /latest?page=N                      20 novel cards per page (37 pages)
+//   /novel/<slug>                       novel page (cover, author, synopsis)
+//   /novel/<slug>/chapters?page=N       50 chapter links per page, ascending
+//   /novel/<slug>/chapter/<n>           chapter text
+// /search is filled in by JavaScript, so search() below is a best guess (see VERIFY).
+
+const BASE = "https://riwayatarab.com";
+const PAGE_SIZE = 20;
 
 async function getDoc(path) {
-  const url = /^https?:\/\//i.test(path) ? path : BASE + (path.charAt(0) === "/" ? path : "/" + path);
-  const res = await harbor.http(url, { responseType: "text", timeoutMs: 20000 });
-  if (!res.ok) throw new Error("HTTP " + res.status + " for " + url);
+  const res = await harbor.http(path.startsWith("http") ? path : BASE + path, { responseType: "text" });
+  if (!res.ok) throw new Error("http " + res.status + " for " + path);
   return harbor.parseHtml(res.body);
 }
 
 function abs(url) {
   if (!url) return undefined;
-  const s = String(url).trim();
-  if (!s) return undefined;
-  if (/^https?:\/\//i.test(s)) return s;
-  if (s.indexOf("//") === 0) return "https:" + s;
-  return s.charAt(0) === "/" ? BASE + s : BASE + "/" + s;
+  if (/^https?:\/\//i.test(url)) return url;
+  if (url.startsWith("//")) return "https:" + url;
+  if (url.startsWith("/")) return BASE + url;
+  return BASE + "/" + url;
 }
 
+function safeDecode(s) {
+  try { return decodeURIComponent(s); } catch (_) { return s; }
+}
 function clean(s) {
-  return String(s || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+  return (s || "").replace(/\s+/g, " ").trim();
+}
+function slugFromHref(href) {
+  const m = (href || "").match(/\/novel\/([^/?#]+)/);
+  return m ? safeDecode(m[1]) : "";
+}
+function novelPath(slug) {
+  return "/novel/" + encodeURIComponent(slug);
+}
+function mapStatus(text) {
+  if (/مكتملة/.test(text || "")) return "completed";
+  if (/متوقفة/.test(text || "")) return "hiatus";
+  if (/مستمرة/.test(text || "")) return "ongoing";
+  return undefined;
 }
 
-function relativePath(href) {
-  let s = String(href || "").split("#")[0].split("?")[0];
-  s = s.replace(/^https?:\/\/rewayat\.club/i, "");
-  return "/" + s.replace(/^\/+/, "");
-}
-
-function novelId(href) {
-  const s = relativePath(href);
-  const m = s.match(/^\/novel\/([^/]+)\/?$/i);
-  return m ? decodeURIComponent(m[1]) : "";
-}
-
-function chapterInfo(href) {
-  const s = relativePath(href);
-  const m = s.match(/^\/novel\/([^/]+)\/(\d+)\/?$/i);
-  if (!m) return null;
-  return { id: s.replace(/\/$/, ""), novel: decodeURIComponent(m[1]), number: m[2] };
-}
-
-function novelCards(doc) {
+// Card text looks like: "<title> <status> <title> بقلم: <author> <synopsis> <genre> <views> ..."
+// There are no class names in the rendered text, so cards are found by their link.
+function parseCards(doc) {
   const out = [];
-  const seen = {};
-  const links = doc.querySelectorAll("a[href]");
-  for (let i = 0; i < links.length; i++) {
-    const a = links[i];
-    const id = novelId(a.attr("href") || "");
-    if (!id || seen[id]) continue;
+  const seen = new Set();
+  doc.querySelectorAll("a[href*='/novel/']").forEach((a) => {
+    const href = a.attr("href") || "";
+    if (/\/chapter\/|\/chapters/.test(href)) return;
+    const id = slugFromHref(href);
+    if (!id || seen.has(id)) return;
+    const text = clean(a.text());
+    const m = text.match(/^(.*?)\s+(مستمرة|مكتملة|متوقفة)\s/);
+    if (!m) return; // navigation links have no status word
+    seen.add(id);
     const img = a.querySelector("img");
-    const title = clean(a.attr("title") || (img && (img.attr("alt") || img.attr("title"))) || a.text());
-    if (!title) continue;
-    seen[id] = true;
     out.push({
-      id: id,
-      title: title,
-      cover: abs(img && (img.attr("data-src") || img.attr("data-lazy-src") || img.attr("src"))),
-      siteUrl: BASE + "/novel/" + encodeURIComponent(id) + "/"
+      id,
+      title: clean(m[1]),
+      status: mapStatus(m[2]),
+      cover: abs(img?.attr("src")),
     });
-  }
+  });
   return out;
-}
-
-function extractChapters(doc, wanted) {
-  const links = doc.querySelectorAll("a[href]");
-  const out = [];
-  const seen = {};
-  for (let i = 0; i < links.length; i++) {
-    const info = chapterInfo(links[i].attr("href") || "");
-    if (!info || info.novel !== wanted || seen[info.number]) continue;
-    const number = Number(info.number);
-    if (!Number.isFinite(number) || number < 1 || number > 8000) continue;
-    seen[info.number] = true;
-    out.push({
-      number: number,
-      id: info.id,
-      title: clean(links[i].text()) || "الفصل " + info.number
-    });
-  }
-  out.sort(function(a, b) { return a.number - b.number; });
-  return out;
-}
-
-function totalChapters(doc) {
-  const text = clean(doc.text());
-  const m = text.match(/الفصول\s*[\(（]\s*(\d+)\s*[\)）]/u);
-  return m ? Number(m[1]) : 0;
-}
-
-function findContent(doc) {
-  const selectors = [
-    ".chapter-content",
-    ".reading-content",
-    ".entry-content",
-    ".single-content",
-    ".post-content",
-    "article .entry-content",
-    "article"
-  ];
-  for (let i = 0; i < selectors.length; i++) {
-    const node = doc.querySelector(selectors[i]);
-    if (node) return node;
-  }
-  return null;
-}
-
-function extractText(root) {
-  if (!root) return "";
-  const nodes = root.querySelectorAll("p, blockquote");
-  const out = [];
-  const seen = {};
-  for (let i = 0; i < nodes.length; i++) {
-    const text = clean(nodes[i].text());
-    if (text && !seen[text]) {
-      seen[text] = true;
-      out.push(text);
-    }
-  }
-  return out.length ? out.join("\n\n") : clean(root.text());
 }
 
 const plugin = {
-  id: "rewayat",
-  name: "نادي الروايات",
+  id: "riwayatarab",
+  name: "رواياتعرب",
 
+  // "Latest updates" is the only server-rendered listing, so it doubles as popular.
   async popular(offset) {
-    const page = Math.floor(Number(offset || 0) / 24) + 1;
-    return novelCards(await getDoc("/library?page=" + page));
+    const page = Math.floor(offset / PAGE_SIZE) + 1;
+    return parseCards(await getDoc("/latest?page=" + page));
   },
 
+  // VERIFY: /search is client-rendered, so this param name is a guess. If it returns
+  // nothing, open DevTools > Network on /search, type a word, and send me that request.
   async search(query, offset) {
-    const page = Math.floor(Number(offset || 0) / 24) + 1;
-    return novelCards(await getDoc("/?s=" + encodeURIComponent(query) + "&page=" + page));
+    const page = Math.floor(offset / PAGE_SIZE) + 1;
+    return parseCards(await getDoc("/search?q=" + encodeURIComponent(query) + "&page=" + page));
   },
 
   async detail(id) {
-    const doc = await getDoc("/novel/" + encodeURIComponent(id) + "/");
+    const doc = await getDoc(novelPath(id));
     const h1 = doc.querySelector("h1");
-    const og = doc.querySelector("meta[property='og:image']");
-    const img = doc.querySelector("img[data-src], img[data-lazy-src], img[src]");
-    const desc = doc.querySelector(".description, .summary, .novel-description, [class*='description']");
-    const title = clean(h1 ? h1.text() : id);
+    if (!h1) return null;
+    const title = clean(h1.text());
+    const body = clean(doc.querySelector("body")?.text() || "");
+
+    const author = body.match(/بقلم:\s*(.+?)\s+[\d.,]+\S*\s*مشاهدة/)?.[1];
+    const chapters = body.match(/(\d+)\s*فصل/)?.[1];
+    const synopsis = body.match(/نبذة عن الرواية\s*([\s\S]*?)\s*قائمة الفصول/)?.[1];
+    const cover = doc.querySelector("img[src*='/uploads/covers/']") || doc.querySelector("img[alt='" + title.replace(/'/g, "") + "']");
+
     return {
-      id: id,
-      title: title,
-      cover: abs(og ? og.attr("content") : (img ? (img.attr("data-src") || img.attr("data-lazy-src") || img.attr("src")) : undefined)),
-      description: desc ? clean(desc.text()) : undefined,
-      chapters: totalChapters(doc),
-      siteUrl: BASE + "/novel/" + encodeURIComponent(id) + "/"
+      id,
+      title,
+      cover: abs(cover?.attr("src")),
+      description: clean(synopsis) || undefined,
+      author: author && author !== "غير محدد" ? clean(author) : undefined,
+      status: mapStatus(body.slice(0, body.indexOf("بقلم") > 0 ? body.indexOf("بقلم") : 400)),
+      chapters: chapters ? Number(chapters) : undefined,
+      originalLanguage: "ar",
+      genres: doc.querySelectorAll("a[href*='/search?category=']").map((a) => clean(a.text())).filter(Boolean).slice(0, 5),
     };
   },
 
+  // Chapter pages are 50 links each, ascending: /novel/<slug>/chapters?page=N
+  // Chapter id = "<slug>::<number>".
   async chapters(id) {
-    const wanted = String(id || "").replace(/^\\/+|\\/+$/g, "");
-    const first = await getDoc("/novel/" + encodeURIComponent(wanted) + "/");
-    const total = totalChapters(first);
-    const all = [];
-    const seen = {};
-
-    function add(doc) {
-      const items = extractChapters(doc, wanted);
-      for (let i = 0; i < items.length; i++) {
-        if (!seen[items[i].id]) {
-          seen[items[i].id] = true;
-          all.push(items[i]);
-        }
+    const out = [];
+    const seen = new Set();
+    let totalPages = 0;
+    for (let page = 1; page <= 300; page++) {
+      const doc = await getDoc(novelPath(id) + "/chapters" + (page > 1 ? "?page=" + page : ""));
+      if (!totalPages) {
+        const m = clean(doc.querySelector("body")?.text() || "").match(/الصفحة\s*\d+\s*من\s*(\d+)/);
+        totalPages = m ? Number(m[1]) : 0;
       }
+      const before = out.length;
+      doc.querySelectorAll("a[href*='/chapter/']").forEach((a) => {
+        const href = a.attr("href") || "";
+        const num = href.match(/\/chapter\/([^/?#]+)/)?.[1];
+        if (!num || seen.has(num)) return;
+        seen.add(num);
+        const text = clean(a.text());
+        const views = text.replace(/^.*الفصل\s*[\d.]+\s*/, "").trim(); // trailing view count
+        out.push({
+          id: id + "::" + safeDecode(num),
+          chapter: safeDecode(num),
+          position: out.length,
+          title: "الفصل " + safeDecode(num),
+          pages: 0,
+          language: "ar",
+          views: /^[\d.,]+[كم]?$/.test(views) ? views : undefined,
+        });
+      });
+      if (out.length === before) break;
+      if (totalPages && page >= totalPages) break;
     }
-
-    add(first);
-
-    const maxPages = total > 0 ? Math.ceil(total / 25) + 2 : 100;
-    for (let page = 2; page <= maxPages; page++) {
-      if (total > 0 && all.length >= total) break;
-      const before = all.length;
-      add(await getDoc("/novel/" + encodeURIComponent(wanted) + "/?page=" + page));
-      if (all.length === before) break;
-    }
-
-    all.sort(function(a, b) {
-      return Number(a.number) - Number(b.number);
-    });
-
-    return all.map(function(item, index) {
-      return {
-        id: item.id,
-        chapter: String(item.number),
-        title: item.title,
-        position: index,
-        pages: 0,
-        language: "ar"
-      };
-    });
-  }
-
-  async content(chapterId) {
-    const path = String(chapterId || "").replace(/^https?:\/\/rewayat\.club/i, "");
-    const doc = await getDoc(path);
-    return extractText(findContent(doc)) || extractText(doc);
+    return out;
   },
 
-  async tags() {
-    return [];
-  }
+  // VERIFY: paragraph container unknown. Tries article/main <p>, then every <p>.
+  // The site injects watermark lines ("حقوق ... عالم الروايات ...") between paragraphs;
+  // those exact spam lines are dropped, everything else stays in source order.
+  async content(chapterId) {
+    const [slug, num] = chapterId.split("::");
+    const doc = await getDoc(novelPath(slug) + "/chapter/" + encodeURIComponent(num));
+    let blocks = doc.querySelectorAll("article p, main p");
+    if (blocks.length < 3) blocks = doc.querySelectorAll("p");
+    const spam = /عالم الروايات|الموقع الرسمي|المحتوى المسروق|المترجم بقراءة|رواياتعرب|جميع الحقوق محفوظة/;
+    return blocks
+      .map((n) => n.text().trim())
+      .filter((t) => t && !spam.test(t))
+      .join("\n\n");
+  },
 };
