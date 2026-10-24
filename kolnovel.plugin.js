@@ -1,266 +1,234 @@
+// Harbor eBook source plugin: Kol Novel (ملوك الروايات) - https://kolnovel.com
+//
+// Built from the rendered text of /series/ and one series page. Anything marked
+// "VERIFY" is a selector guess that needs checking against the raw HTML.
+
 const BASE = "https://kolnovel.com";
+const PAGE_SIZE = 20; // /series/ shows 20 cards per page (273 works / 14 pages)
 
 async function getDoc(path) {
-  const url = /^https?:\/\//i.test(path) ? path : BASE + (path.startsWith("/") ? path : "/" + path);
-  const res = await harbor.http(url, { responseType: "text", timeoutMs: 20000 });
-  if (!res.ok) throw new Error("HTTP " + res.status + " for " + url);
+  const res = await harbor.http(path.startsWith("http") ? path : BASE + path, { responseType: "text" });
+  if (!res.ok) throw new Error("http " + res.status + " for " + path);
   return harbor.parseHtml(res.body);
 }
 
 function abs(url) {
   if (!url) return undefined;
-  const v = String(url).trim();
-  if (!v) return undefined;
-  if (/^https?:\/\//i.test(v)) return v;
-  if (v.startsWith("//")) return "https:" + v;
-  return v.startsWith("/") ? BASE + v : BASE + "/" + v;
+  if (/^https?:\/\//i.test(url)) return url;
+  if (url.startsWith("//")) return "https:" + url;
+  if (url.startsWith("/")) return BASE + url;
+  return BASE + "/" + url;
 }
 
-function clean(v) { return String(v || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim(); }
-function pageNumber(offset) { return Math.floor(Number(offset || 0) / 20) + 1; }
-function seriesId(href) {
-  const m = (abs(href) || "").match(/\/series\/([^/?#]+)\/?(?:[?#].*)?$/i);
-  if (!m) return "";
-  try { return decodeURIComponent(m[1]); } catch (_) { return m[1]; }
+// Slugs are Arabic. Normalise so encoded/raw hrefs give the same stable id.
+function safeDecode(s) {
+  try { return decodeURIComponent(s); } catch (_) { return s; }
 }
-function seriesPath(id) { return "/series/" + encodeURIComponent(id) + "/"; }
-function chapterArchivePath(id) { return "/shaag24category/" + encodeURIComponent(id) + "/"; }
-
-function chapterNumber(text) {
-  const s = clean(text);
-  const m = s.match(/(?:الفصل|فصل|chapter|ch\.?)[\s:#-]*(\d+(?:\.\d+)?)/iu);
-  return m ? m[1] : undefined;
+function seriesIdFromHref(href) {
+  const m = (href || "").match(/\/series\/([^/?#]+)/);
+  return m ? safeDecode(m[1]) : "";
 }
-
-function volumeNumber(text) {
-  const s = clean(text);
-  const m = s.match(/(?:المجلد|مجلد|volume|vol\\.?)[\\s:#-]*(\\d+)/iu);
-  return m ? m[1] : undefined;
+function seriesPath(id) {
+  return "/series/" + encodeURIComponent(id) + "/";
+}
+function chapterIdFromHref(href) {
+  // Chapter URLs sit at the site root (/shaag24...-298131/). Keep the decoded path.
+  return safeDecode((href || "").replace(BASE, "").replace(/^\//, "").replace(/[?#].*$/, ""));
+}
+function chapterPath(id) {
+  return "/" + encodeURIComponent(id).replace(/%2F/gi, "/");
 }
 
-function chapterNumberFromUrl(url) {
-  const s = String(url || "");
-  const patterns = [
-    /(?:chapter|chap|ch|الفصل|فصل)[-_ ]?(\d+(?:\.\d+)?)/iu,
-    /(?:-|_)(\d+(?:\.\d+)?)(?:\/?(?:[?#].*)?)$/u
-  ];
-  for (const re of patterns) { const m = s.match(re); if (m) return m[1]; }
+function cleanTitle(value) {
+  return (value || "").replace(/\s+/g, " ").trim();
+}
+
+function mapStatus(text) {
+  if (/مكتملة/.test(text || "")) return "completed";
+  if (/متوقفة/.test(text || "")) return "hiatus";
+  if (/مستمرة/.test(text || "")) return "ongoing";
   return undefined;
 }
 
-function chapterId(url) {
-  const absolute = abs(url);
-  if (!absolute) return "";
-  // Harbor chapter IDs are kept as site-relative paths. This is important:
-  // the reader passes the ID back to content(), which then resolves it with BASE.
-  return absolute.replace(/^https?:\/\/kolnovel\.com/i, "").replace(/^\/+/, "/");
+const TYPE_LANG = { chinese: "zh", japanese: "ja", korean: "ko", english: "en" };
+
+// Filters confirmed from the site's own menu links:
+//   ?type[]=japanese|korean|english|chinese, ?status=completed, ?order=update
+function browseQuery(tagId) {
+  const params = [];
+  if (tagId?.startsWith("type:")) params.push("type%5B%5D=" + encodeURIComponent(tagId.slice(5)));
+  if (tagId?.startsWith("status:")) params.push("status=" + encodeURIComponent(tagId.slice(7)));
+  if (tagId?.startsWith("sort:")) params.push("order=" + encodeURIComponent(tagId.slice(5)));
+  return params.length ? "&" + params.join("&") : "";
 }
 
-function isChapterUrl(url) {
-  const absolute = abs(url) || "";
-  // Accept both www/non-www and chapter slugs under the site's /shaag... route.
-  return /^https?:\/\/(?:www\.)?kolnovel\.com\/shaag[^?#]*(?:[?#].*)?$/i.test(absolute);
+const FAN_GENRES = ["فان فيكشن", "فانفيك", "فان"];
+
+// Card = block holding an <h3><a href="/series/..."> title. The container class is
+// unknown (VERIFY), so try common wrappers and keep whichever matches real cards.
+function findCards(doc) {
+  for (const sel of ["article", "li", ".card", ".series-card", ".novel-card"]) {
+    const els = doc.querySelectorAll(sel).filter((el) => el.querySelector("h3 a[href*='/series/']"));
+    if (els.length) return els;
+  }
+  return [];
 }
 
-function card(link) {
-  const href = link.attr("href") || "";
-  const id = seriesId(href);
+function cardToSummary(el) {
+  const titleLink = el.querySelector("h3 a[href*='/series/']");
+  if (!titleLink) return null;
+  const id = seriesIdFromHref(titleLink.attr("href"));
   if (!id) return null;
-  const img = link.querySelector("img");
-  const title = clean(link.attr("title") || img?.attr("alt") || img?.attr("title") || link.text());
-  if (!title) return null;
+
+  const text = el.text() || "";
+  const img = el.querySelector("img");
+  const rating = text.match(/★\s*([\d.]+)/);
+  const genreBlock = text.match(/التصنيفات\s*([\s\S]*?)\s*الملخص/);
+  const genres = genreBlock
+    ? genreBlock[1].split("·").map((g) => g.trim()).filter(Boolean)
+    : [];
+
   return {
     id,
-    title: title.replace(/\s+(?:kol|كول)$/iu, "").trim(),
-    cover: abs(img?.attr("data-src") || img?.attr("data-lazy-src") || img?.attr("src")),
-    siteUrl: abs(href)
+    title: cleanTitle(titleLink.attr("title") || titleLink.text()),
+    cover: abs(img?.attr("data-src") || img?.attr("src")),
+    status: mapStatus(text),
+    genres,
+    score: rating ? Number(rating[1]) : undefined,
+    // Harbor drops entries flagged true; remove this if you want fan fiction listed.
+    isFanMade: genres.some((g) => FAN_GENRES.includes(g)),
   };
 }
 
-function mapSeriesResults(doc) {
-  const links = doc.querySelectorAll("a[href*='/series/']");
-  const out = [], seen = {};
-  for (const link of links) {
-    const item = card(link);
-    if (!item || seen[item.id]) continue;
-    seen[item.id] = true;
-    out.push(item);
-  }
-  return out;
+function parseCards(doc) {
+  return findCards(doc).map(cardToSummary).filter(Boolean);
 }
 
-function extractChapters(doc) {
-  const out = [];
-  const seen = {};
-  // Important: inspect ALL anchors. A previous version stopped as soon as
-  // it found any table/list anchors, even if they were only author/category
-  // links, so it never reached the actual chapter links farther down the page.
-  for (const a of doc.querySelectorAll("a[href]")) {
-    const href = a.attr("href") || "";
-    const absolute = abs(href);
-    if (!absolute || !/^https?:\/\/(?:www\.)?kolnovel\.com\//i.test(absolute)) continue;
-    if (/\/series\//i.test(absolute) || /\/genre\//i.test(absolute) || /\/tag\//i.test(absolute)) continue;
-
-    const title = clean(a.text()) || clean(a.attr("title")) || clean(a.attr("aria-label"));
-    const number = chapterNumber(title) || chapterNumberFromUrl(absolute);
-    const textLooksLikeChapter = /(?:الفصل|فصل|chapter|ch\.?)[\s:#-]*\d+/iu.test(title);
-    const urlLooksLikeChapter = /\/(?:shaag|chapter|chap)[^/]*(?:\/|$)/i.test(absolute) ||
-      /(?:chapter|chap|ch)[-_ ]?\d+/i.test(absolute);
-    if (!textLooksLikeChapter && !urlLooksLikeChapter) continue;
-    if (!number && !textLooksLikeChapter) continue;
-
-    const id = chapterId(absolute);
-    if (!id || seen[id]) continue;
-    seen[id] = true;
-    out.push({
-      id,
-      chapter: number || String(out.length + 1),
-      title: title || "الفصل " + (number || String(out.length + 1)),
-      volume,
-      position: out.length,
-      pages: 0,
-      language: "ar"
-    });
-  }
-
-  out.sort((a, b) => {
-    const an = Number(String(a.chapter || "").replace(/[^0-9.]/g, ""));
-    const bn = Number(String(b.chapter || "").replace(/[^0-9.]/g, ""));
-    if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn;
-    return a.position - b.position;
-  });
-  for (let i = 0; i < out.length; i++) out[i].position = i;
-  return out;
-}
-
-function findCover(doc) {
-  const selectors = [
-    ".series-cover img", ".book-cover img", ".summary_image img",
-    ".summary_img img", ".wp-post-image", ".series-thumb img",
-    ".post-thumbnail img", "figure img", "meta[property='og:image']",
-    "meta[name='twitter:image']"
-  ];
-  for (const selector of selectors) {
-    const node = doc.querySelector(selector);
-    const src = imageFrom(node);
-    if (src && !/placeholder|blank\.gif|no-image|default-cover/i.test(src)) return src;
-  }
-  // Fallback: select a likely cover image, not an arbitrary tiny site icon.
-  for (const node of doc.querySelectorAll("img[data-src], img[data-lazy-src], img[data-original], img[src]")) {
-    const src = imageFrom(node);
-    if (src && !/logo|avatar|icon|placeholder|blank\.gif|no-image/i.test(src)) return src;
-  }
-  return undefined;
-}
-
-function findContent(doc) {
-  const selectors = [
-    ".reading-content", ".chapter-content", ".entry-content", ".text-left",
-    ".reading-area", ".single-content", ".post-content", ".article-content",
-    "article .entry-content", "article"
-  ];
-  for (const s of selectors) { const n = doc.querySelector(s); if (n) return n; }
-  return null;
-}
-
-function extractText(root) {
-  if (!root) return "";
-  const nodes = root.querySelectorAll("p, blockquote");
-  const out = [], seen = {};
-  for (const n of nodes) {
-    const t = clean(n.text());
-    if (t && !seen[t]) { seen[t] = true; out.push(t); }
-  }
-  return out.length ? out.join("\n\n") : clean(root.text());
-}
-
-function browseParams(tagId) {
-  let order = "update", status = "";
-  if (tagId === "sort:popular") order = "popular";
-  else if (tagId === "sort:rating") order = "rating";
-  else if (tagId === "sort:chapters") order = "chapters";
-  else if (tagId === "status:ongoing") status = "ongoing";
-  else if (tagId === "status:completed") status = "completed";
-  else if (tagId === "status:hiatus") status = "hiatus";
-  return { order, status };
+// Chapter titles look like "الفصل 12 · عنوان" (or "الفصل 12.5 · ...").
+function parseChapterLabel(label) {
+  const clean = cleanTitle(label);
+  const m = clean.match(/الفصل\s+([\d.]+)\s*[·\-–:]?\s*(.*)$/);
+  return m ? { chapter: m[1], title: m[2] || clean } : { chapter: undefined, title: clean };
 }
 
 const plugin = {
   id: "kolnovel",
-  name: "KolNovel",
+  name: "Kol Novel (ملوك الروايات)",
 
   async popular(offset, tagId) {
-    const { order, status } = browseParams(tagId);
-    return mapSeriesResults(await getDoc("/series/?order=" + encodeURIComponent(order) + "&page=" + pageNumber(offset) + "&status=" + encodeURIComponent(status) + "&type="));
+    const page = Math.floor(offset / PAGE_SIZE) + 1;
+    const doc = await getDoc("/series/?paged=" + page + browseQuery(tagId));
+    return parseCards(doc);
   },
 
+  // VERIFY: assumes the standard WordPress search param (?s=).
   async search(query, offset, tagId) {
-    const q = clean(query);
-    if (!q) return [];
-    const page = pageNumber(offset);
-    const encoded = encodeURIComponent(q);
-    // KolNovel's catalogue lives at /series/. Try its catalogue search first.
-    // The home page can still render unrelated popular series for an unknown
-    // query, so never treat an unfiltered home-page result as a successful search.
-    const paths = [
-      "/series/?search=" + encoded + "&page=" + page,
-      "/series/?searchTerm=" + encoded + "&page=" + page,
-      "/series/?s=" + encoded + "&page=" + page,
-      "/?s=" + encoded + "&paged=" + page
-    ];
-    for (let i = 0; i < paths.length; i++) {
-      try {
-        const doc = await getDoc(paths[i]);
-        const found = mapSeriesResults(doc);
-        if (!found.length) continue;
-        if (i === paths.length - 1) {
-          const qLower = q.toLocaleLowerCase();
-          const matched = found.filter(x => clean(x.title).toLocaleLowerCase().includes(qLower));
-          if (matched.length) return matched;
-          continue;
-        }
-        return found;
-      } catch (_) {}
-    }
-    return [];
+    const page = Math.floor(offset / PAGE_SIZE) + 1;
+    const doc = await getDoc(
+      "/?s=" + encodeURIComponent(query) + "&post_type=series&paged=" + page + browseQuery(tagId),
+    );
+    return parseCards(doc);
   },
 
   async detail(id) {
     const doc = await getDoc(seriesPath(id));
-    const title = clean(doc.querySelector("h1")?.text() || id);
-    const cover = findCover(doc);
+    const h1 = doc.querySelector("h1");
+    if (!h1) return null;
+    const title = cleanTitle(h1.text());
+    const pageText = doc.querySelector("main")?.text() || doc.text?.() || "";
+
+    // The profile block lists الفصول / صدر في / اللغة / المشاهدات as label+value pairs.
+    const chaptersMatch = pageText.match(/الفصول\s*(\d+)/);
+    const langMatch = pageText.match(/اللغة\s*(الصينية|اليابانية|الكورية|الإنجليزية|العربية)/);
+    const langKey = { "الصينية": "chinese", "اليابانية": "japanese", "الكورية": "korean", "الإنجليزية": "english" }[langMatch?.[1]];
+
+    // Cover: the first uploaded image whose alt equals the series title (logo alt differs).
+    const cover = doc
+      .querySelectorAll("img")
+      .find((i) => (i.attr("alt") || "").trim() === title && /wp-content\/uploads/.test(i.attr("src") || ""));
+
     return {
       id,
       title,
-      cover,
-      description: clean(doc.querySelector(".description, .summary, .series-description, .desc")?.text()) || undefined,
-      chapters: extractChapters(doc).length,
-      siteUrl: BASE + seriesPath(id)
+      // VERIFY: English/original title sits right under the h1 ("Mysterious Revival").
+      altTitle: cleanTitle(doc.querySelector("h1 + p, h1 + div, h1 + span")?.text()) || undefined,
+      cover: abs(cover?.attr("src")),
+      // VERIFY: synopsis block under "القصة"; falls back to og-free empty value.
+      description: cleanTitle(
+        doc.querySelector("#about .synopsis, #about .summary, #about p, .synopsis, .summary")?.text(),
+      ) || undefined,
+      author: cleanTitle(doc.querySelector("a[href*='/writer/']")?.text()) || undefined,
+      status: mapStatus(pageText.slice(0, 600)),
+      chapters: chaptersMatch ? Number(chaptersMatch[1]) : undefined,
+      originalLanguage: TYPE_LANG[langKey],
+      genres: doc.querySelectorAll("a[href*='/genre/']").map((a) => cleanTitle(a.text())).filter(Boolean),
     };
   },
 
+  // The chapter table is empty in the server HTML (filled by JS), so this tries, in order:
+  //   1. rows already present in the page
+  //   2. the paged URL the site itself links to (?chapter_volume&chapter_page=N#chapters)
+  //   3. walking first chapter -> next links (slow, last resort)
   async chapters(id) {
-    // KolNovel's series page contains the actual chapter archive, newest first.
-    // Extract the complete list from that page; do not fall back to a guessed
-    // list-mode URL, which can return an unrelated/empty page.
-    const doc = await getDoc(seriesPath(id));
-    return extractChapters(doc);
+    const out = [];
+    const seen = new Set();
+    const push = (a) => {
+      const href = a.attr("href") || "";
+      if (!href || seen.has(href) || /\/series\/|\/genre\/|\/type\/|\/writer\/|\/translators\//.test(href)) return;
+      if (!/الفصل/.test(a.text() || "") ) return;
+      seen.add(href);
+      const { chapter, title } = parseChapterLabel(a.text());
+      out.push({
+        id: chapterIdFromHref(href),
+        chapter,
+        position: out.length,
+        title,
+        pages: 0,
+        language: "ar",
+      });
+    };
+
+    for (let page = 1; page <= 60; page++) {
+      const suffix = page === 1 ? "" : "?chapter_volume&chapter_page=" + page;
+      const doc = await getDoc(seriesPath(id) + suffix);
+      const before = out.length;
+      doc.querySelectorAll("#chapters a, table a, [class*='chapter'] a").forEach(push);
+      if (out.length === before) break; // nothing new: last page (or JS-only list)
+    }
+    if (out.length) return out;
+
+    // Fallback: follow "next" links from the "ابدأ القراءة" button.
+    const first = (await getDoc(seriesPath(id))).querySelector("a[href*='shaag24'], a[href*='/ابدأ']");
+    let href = first?.attr("href");
+    for (let i = 0; href && i < 2000 && !seen.has(href); i++) {
+      seen.add(href);
+      const doc = await getDoc(href);
+      const { chapter, title } = parseChapterLabel(doc.querySelector("h1")?.text() || "");
+      out.push({ id: chapterIdFromHref(href), chapter, position: out.length, title, pages: 0, language: "ar" });
+      href = doc.querySelector("a[rel='next']")?.attr("href"); // VERIFY next-link selector
+    }
+    return out;
   },
 
+  // VERIFY: reader container selector. Falls back to every <p> inside <article>/<main>.
   async content(chapterId) {
-    const doc = await getDoc(chapterId);
-    const root = findContent(doc);
-    return extractText(root) || extractText(doc);
+    const doc = await getDoc(chapterPath(chapterId));
+    let blocks = doc.querySelectorAll(
+      ".chapter-content > p, .reader-content > p, #chapter-content > p, .entry-content > p",
+    );
+    if (!blocks.length) blocks = doc.querySelectorAll("article p, main p");
+    // Source order only: never sort, reverse, or dedupe Arabic prose.
+    return blocks.map((n) => n.text().trim()).filter(Boolean).join("\n\n");
   },
 
   async tags() {
     return [
-      { id: "status:ongoing", name: "Ongoing", group: "Status" },
-      { id: "status:completed", name: "Completed", group: "Status" },
-      { id: "status:hiatus", name: "Hiatus", group: "Status" },
-      { id: "sort:popular", name: "Popular", group: "Sort" },
-      { id: "sort:chapters", name: "Chapters", group: "Sort" },
-      { id: "sort:rating", name: "Rating", group: "Sort" }
+      { id: "type:chinese", name: "صينية", group: "Type" },
+      { id: "type:japanese", name: "يابانية", group: "Type" },
+      { id: "type:korean", name: "كورية", group: "Type" },
+      { id: "type:english", name: "إنجليزية", group: "Type" },
+      { id: "status:completed", name: "مكتملة", group: "Status" },
+      { id: "sort:update", name: "آخر التحديثات", group: "Sort" },
     ];
-  }
+  },
 };
