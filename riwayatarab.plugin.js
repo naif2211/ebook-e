@@ -1,5 +1,5 @@
 // Harbor eBook source for RiwayatArab
-// v1.8.5 - robust URL parsing, chapter extraction and offset-aware listings.
+// v1.8.6 - tolerant chapter-link extraction for Harbor parsed pages.
 const BASE = "https://riwayatarab.com";
 const PAGE_SIZE = 20;
 
@@ -119,19 +119,36 @@ function queryValue(q,key) {
 }
 function extractChapters(doc,id) {
   const out=[], seen={};
-  const expected=("/novel/"+id).toLowerCase();
+  const slug=String(id||"").toLowerCase();
+  // RiwayatArab renders chapter links as /novel/<slug>/chapter/<number>.
+  // Do not depend on the anchor's displayed text or on an exact hostname:
+  // both can vary in Harbor's parsed server-side HTML.
   for(const a of doc.querySelectorAll("a[href]")) {
-    const u=abs(a.attr("href")||"");
-    if(!u || !/^https?:\/\/(?:www\.)?riwayatarab\.com\//i.test(u)) continue;
+    const raw=a.attr("href")||"";
+    const u=abs(raw)||"";
     const path=urlPath(u).replace(/\/$/,"");
-    if(path.toLowerCase()===(expected+"/chapters")) continue;
-    if(novelId(u)!==id) continue;
-    const text=clean(a.text()||a.attr("title")||a.attr("aria-label")||"");
-    const n=chapterNum(text,u);
-    if(!n || !/\/(?:chapter|chap|ch)[-_\/]/i.test(path)) continue;
-    if(seen[path]) continue;
-    seen[path]=1;
-    out.push({id:path,chapter:n,title:text||("الفصل "+n)});
+    const lower=path.toLowerCase();
+    if(!lower.includes("/novel/"+slug+"/")) continue;
+    if(!/(?:^|\/)(?:chapter|chap|ch)(?:\/|-|_)/i.test(path)) continue;
+    const n=chapterNum(a.text()||a.attr("title")||a.attr("aria-label")||"",path);
+    if(!n) continue;
+    const key=path.toLowerCase();
+    if(seen[key]) continue;
+    seen[key]=1;
+    out.push({id:path,chapter:n,title:clean(a.text()||a.attr("title")||"الفصل "+n)});
+  }
+  // Fallback: some rendered pages expose chapter URLs in data attributes.
+  if(!out.length) {
+    for(const node of doc.querySelectorAll("[data-href],[data-url],[data-chapter-url]")) {
+      const raw=node.attr("data-href")||node.attr("data-url")||node.attr("data-chapter-url")||"";
+      const path=urlPath(raw).replace(/\/$/,"");
+      if(!path.toLowerCase().includes("/novel/"+slug+"/")) continue;
+      const n=chapterNum(node.text(),path);
+      if(!n || !/(?:^|\/)(?:chapter|chap|ch)(?:\/|-|_)/i.test(path)) continue;
+      if(seen[path.toLowerCase()]) continue;
+      seen[path.toLowerCase()]=1;
+      out.push({id:path,chapter:n,title:clean(node.text())||("الفصل "+n)});
+    }
   }
   return out;
 }
