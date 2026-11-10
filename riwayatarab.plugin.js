@@ -93,36 +93,17 @@ function toWesternDigits(value) {
 function chapterNum(text,url) {
   const t=toWesternDigits(clean(text));
   const u=toWesternDigits(String(url||""));
-  let m=t.match(/(?:الفصل|فصل|رقم\\s*الفصل|chapter|chap|ch\\.?)[\\s:#._-]*(\\d+(?:\\.\\d+)?)/iu);
+  let m=t.match(/(?:الفصل|فصل|رقم\s*الفصل|chapter|chap|ch\.?)[\s:#._-]*(\d+(?:\.\d+)?)/iu);
   if(m) return String(Number(m[1]));
-  m=u.match(/\\/(?:chapter|chap|ch)[-_\\/]?(\\d+(?:\\.\\d+)?)(?:[-_/?.#]|$)/i);
+  m=u.match(/\/(?:chapter|chap|ch)[-_\/]?(\d+(?:\.\d+)?)(?:[-_/?.#]|$)/i);
   if(m) return String(Number(m[1]));
-  m=u.match(/(?:chapter|chap|ch)[-_](\\d+(?:\\.\\d+)?)(?:[-_/?.#]|$)/i);
+  m=u.match(/(?:chapter|chap|ch)[-_](\d+(?:\.\d+)?)(?:[-_/?.#]|$)/i);
   if(m) return String(Number(m[1]));
   return undefined;
 }
-function extractChapters(doc,id) {
-  const out=[], seen={};
-  const expected=("/novel/"+id).toLowerCase();
-  for(const a of doc.querySelectorAll("a[href]")) {
-    const href=a.attr("href")||"";
-    const u=abs(href)||"";
-    if(!/^https?:\\/\\/(?:www\\.)?riwayatarab\\.com\\//i.test(u)) continue;
-    const path=urlPath(u).replace(/\\/$/,"");
-    if(path.toLowerCase()===(expected+"/chapters")) continue;
-    if(novelId(u)!==id) continue;
-    const text=clean(a.text()||a.attr("title")||a.attr("aria-label")||"");
-    const n=chapterNum(text,u);
-    if(!n || !/\\/(?:chapter|chap|ch)[-_\\/]/i.test(path)) continue;
-    if(seen[path]) continue;
-    seen[path]=1;
-    out.push({id:path,chapter:n,title:text||("الفصل "+n)});
-  }
-  return out;
-}
 function urlPath(v) {
   const s=abs(v)||"";
-  const m=s.match(/^https?:\\/\\/[^/]+([^?#]*)/i);
+  const m=s.match(/^https?:\/\/[^/]+([^?#]*)/i);
   return (m?m[1]:s.split(/[?#]/)[0])||"/";
 }
 function urlQuery(v) {
@@ -130,21 +111,41 @@ function urlQuery(v) {
   return q<0?"":s.slice(q+1).split("#")[0];
 }
 function queryValue(q,key) {
-  const re=new RegExp("(?:^|&)"+key+"=(\\\\d+)(?:&|$)","i");
-  const m=String(q||"").match(re);
-  return m?Number(m[1]):0;
+  for(const part of String(q||"").split("&")) {
+    const pair=part.split("=");
+    if(pair[0]===key && /^\d+$/.test(pair[1]||"")) return Number(pair[1]);
+  }
+  return 0;
 }
-function paginationLinks(doc, basePath) {
-  const links=[], seen={}, base=basePath.replace(/\\/$/,"").toLowerCase();
+function extractChapters(doc,id) {
+  const out=[], seen={};
+  const expected=("/novel/"+id).toLowerCase();
   for(const a of doc.querySelectorAll("a[href]")) {
     const u=abs(a.attr("href")||"");
-    if(!u || !/^https?:\\/\\/(?:www\\.)?riwayatarab\\.com\\//i.test(u)) continue;
-    const path=urlPath(u).replace(/\\/$/,"");
+    if(!u || !/^https?:\/\/(?:www\.)?riwayatarab\.com\//i.test(u)) continue;
+    const path=urlPath(u).replace(/\/$/,"");
+    if(path.toLowerCase()===(expected+"/chapters")) continue;
+    if(novelId(u)!==id) continue;
+    const text=clean(a.text()||a.attr("title")||a.attr("aria-label")||"");
+    const n=chapterNum(text,u);
+    if(!n || !/\/(?:chapter|chap|ch)[-_\/]/i.test(path)) continue;
+    if(seen[path]) continue;
+    seen[path]=1;
+    out.push({id:path,chapter:n,title:text||("الفصل "+n)});
+  }
+  return out;
+}
+function paginationLinks(doc,basePath) {
+  const links=[],seen={},base=basePath.replace(/\/$/,"").toLowerCase();
+  for(const a of doc.querySelectorAll("a[href]")) {
+    const u=abs(a.attr("href")||"");
+    if(!u || !/^https?:\/\/(?:www\.)?riwayatarab\.com\//i.test(u)) continue;
+    const path=urlPath(u).replace(/\/$/,"");
     if(path.toLowerCase()!==base) continue;
     const q=urlQuery(u), page=queryValue(q,"page")||queryValue(q,"p");
     if(page<2) continue;
     const key=path+"?page="+page;
-    if(!seen[key]) { seen[key]=1; links.push(key); }
+    if(!seen[key]) {seen[key]=1;links.push(key);}
   }
   links.sort((a,b)=>queryValue(urlQuery(a),"page")-queryValue(urlQuery(b),"page"));
   return links;
