@@ -1,5 +1,5 @@
 // Harbor eBook source for RiwayatArab
-// v1.8.6 - tolerant chapter-link extraction for Harbor parsed pages.
+// v1.8.7 - tolerant chapter-link extraction for Harbor parsed pages.
 const BASE = "https://riwayatarab.com";
 const PAGE_SIZE = 20;
 
@@ -168,57 +168,59 @@ function paginationLinks(doc,basePath) {
   return links;
 }
 async function chapters(id) {
-  const novelPath="/novel/"+encodeURIComponent(id);
-  const indexPath=novelPath+"/chapters";
-  const all=[], seen={};
+  const slug = novelId(id) || clean(id).replace(/^\/+|\/+$/g, "");
+  if (!slug) return [];
+  const indexPath = "/novel/" + encodeURIComponent(slug) + "/chapters";
+  const all = [], seen = {};
   function add(doc) {
-    for(const ch of extractChapters(doc,id)) {
-      if(!seen[ch.id]) { seen[ch.id]=1; all.push(ch); }
+    for (const ch of extractChapters(doc, slug)) {
+      if (!seen[ch.id]) { seen[ch.id] = 1; all.push(ch); }
     }
   }
-
-  // The detail page contains a first-page preview (20 chapters on the verified novel).
-  try { add(await getDoc(novelPath)); } catch(_) {}
 
   let first;
   try {
-    first=await getDoc(indexPath);
+    first = await getDoc(indexPath);
     add(first);
-  } catch(_) {
-    all.sort((x,y)=>Number(x.chapter)-Number(y.chapter));
-    all.forEach((x,i)=>{x.position=i;});
+  } catch (_) {
+    try { add(await getDoc("/novel/" + encodeURIComponent(slug))); } catch (_) {}
+    all.sort((a,b) => Number(a.chapter) - Number(b.chapter));
+    all.forEach((x,i) => { x.position = i; });
     return all;
   }
 
-  const queued=paginationLinks(first,indexPath);
-  const visited={};
-  // Prefer pagination URLs actually emitted by the site.
-  for(const path of queued) {
-    if(visited[path]) continue;
-    visited[path]=1;
-    try { add(await getDoc(path)); } catch(_) {}
-  }
+  // The index reports its total page count (50 chapters per page).
+  const pageText = clean(first.text());
+  const pageMatch = pageText.match(/الصفحة\s*\d+\s*من\s*(\d+)/u);
+  let totalPages = pageMatch ? Number(pageMatch[1]) : 0;
 
-  // Fallback for sites whose pagination links are not exposed in server HTML.
-  const maxPage=500;
-  let empty=0;
-  for(let p=2;p<=maxPage;p++) {
-    const path=indexPath+"?page="+p;
-    if(visited[path]) continue;
+  // Fallback to the pagination anchors if the page-count label is absent.
+  if (!totalPages) {
+    for (const link of paginationLinks(first, indexPath)) {
+      const n = queryValue(urlQuery(link), "page");
+      if (n > totalPages) totalPages = n;
+    }
+  }
+  if (!totalPages || !Number.isFinite(totalPages)) totalPages = 100;
+  totalPages = Math.max(1, Math.min(totalPages, 200));
+
+  let emptyPages = 0;
+  for (let page = 2; page <= totalPages; page++) {
     try {
-      const doc=await getDoc(path);
-      const before=all.length;
+      const doc = await getDoc(indexPath + "?page=" + page);
+      const before = all.length;
       add(doc);
-      if(all.length===before) empty++; else empty=0;
-      if(empty>=5) break;
-    } catch(_) {
-      empty++;
-      if(empty>=3) break;
+      if (all.length === before) emptyPages++;
+      else emptyPages = 0;
+      if (!pageMatch && emptyPages >= 3) break;
+    } catch (_) {
+      emptyPages++;
+      if (!pageMatch && emptyPages >= 3) break;
     }
   }
 
-  all.sort((x,y)=>Number(x.chapter)-Number(y.chapter));
-  all.forEach((x,i)=>{x.position=i;});
+  all.sort((a,b) => Number(a.chapter) - Number(b.chapter));
+  all.forEach((x,i) => { x.position = i; });
   return all;
 }
 function contentRoot(doc) {
