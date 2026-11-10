@@ -1,5 +1,5 @@
 // Harbor eBook source for RiwayatArab
-// v1.8.7 - tolerant chapter-link extraction for Harbor parsed pages.
+// v1.8.8 - tolerant chapter-link extraction for Harbor parsed pages.
 const BASE = "https://riwayatarab.com";
 const PAGE_SIZE = 20;
 
@@ -171,6 +171,7 @@ async function chapters(id) {
   const slug = novelId(id) || clean(id).replace(/^\/+|\/+$/g, "");
   if (!slug) return [];
   const indexPath = "/novel/" + encodeURIComponent(slug) + "/chapters";
+  const orderedIndexPath = indexPath + "?order=desc";
   const all = [], seen = {};
   function add(doc) {
     for (const ch of extractChapters(doc, slug)) {
@@ -180,7 +181,7 @@ async function chapters(id) {
 
   let first;
   try {
-    first = await getDoc(indexPath);
+    first = await getDoc(orderedIndexPath);
     add(first);
   } catch (_) {
     try { add(await getDoc("/novel/" + encodeURIComponent(slug))); } catch (_) {}
@@ -207,7 +208,9 @@ async function chapters(id) {
   let emptyPages = 0;
   for (let page = 2; page <= totalPages; page++) {
     try {
-      const doc = await getDoc(indexPath + "?page=" + page);
+      let doc;
+      try { doc = await getDoc(indexPath + "?order=desc&page=" + page); }
+      catch (_) { doc = await getDoc(indexPath + "?page=" + page); }
       const before = all.length;
       add(doc);
       if (all.length === before) emptyPages++;
