@@ -1,5 +1,5 @@
 // Harbor eBook source for RiwayatArab
-// v1.7.0 - complete chapter pagination + ordered text extraction.
+// v1.8.2 - support chapter links on novel page and paginated chapter index.
 const BASE = "https://riwayatarab.com";
 const PAGE_SIZE = 50;
 
@@ -85,7 +85,7 @@ function extractChapters(doc,id) {
   for(const a of doc.querySelectorAll("a[href]")) {
     const href=a.attr("href")||"", u=abs(href)||"";
     if(!u || !u.includes("riwayatarab.com") || !u.includes("/novel/"))continue;
-    if(/\/chapters?(?:[/?#]|$)/i.test(u))continue;
+    if(/\/novel\/[^/]+\/chapters(?:[/?#]|$)/i.test(u))continue;
     if(novelId(u)!==id)continue;
     const text=clean(a.text()||a.attr("title")||a.attr("aria-label")||""), n=chapterNum(text,u);
     if(!n)continue;
@@ -106,24 +106,43 @@ function pagination(doc) {
   return p;
 }
 async function chapters(id) {
-  const base="/novel/"+encodeURIComponent(id)+"/chapters";
-  const first=await getDoc(base);
-  const all=extractChapters(first,id), seen={};
-  for(const c of all)seen[c.id]=1;
+  const base="/novel/"+encodeURIComponent(id);
+  const all=[], seen={};
+  function addFrom(doc) {
+    for(const ch of extractChapters(doc,id)) {
+      if(!seen[ch.id]) { seen[ch.id]=1; all.push(ch); }
+    }
+  }
+
+  // The novel page contains an initial chapter preview; retain it as a fallback.
+  try { addFrom(await getDoc(base)); } catch(_) {}
+
+  const indexPath=base+"/chapters";
+  let first;
+  try {
+    first=await getDoc(indexPath);
+    addFrom(first);
+  } catch(_) {
+    all.sort((a,b)=>parseFloat(a.chapter)-parseFloat(b.chapter));
+    all.forEach((ch,i)=>{ch.position=i;});
+    return all;
+  }
+
   const pages=pagination(first), max=pages.length?Math.max(...pages):1;
-  // Probe sequentially so all chapter pages are collected even when pagination markup is incomplete.
   let empty=0;
   for(let p=2;p<=Math.max(200,max+2);p++) {
     try {
-      const d=await getDoc(base+"?page="+p);
-      const got=extractChapters(d,id), before=all.length;
-      for(const c of got)if(!seen[c.id]){seen[c.id]=1;all.push(c);}
+      const doc=await getDoc(indexPath+"?page="+p);
+      const before=all.length;
+      addFrom(doc);
       if(all.length===before)empty++;else empty=0;
       if(p>max && empty>=3)break;
-    } catch(_) { if(p>max) {empty++; if(empty>=3)break;} }
+    } catch(_) {
+      if(p>max) {empty++; if(empty>=3)break;}
+    }
   }
   all.sort((a,b)=>parseFloat(a.chapter)-parseFloat(b.chapter));
-  all.forEach((c,i)=>c.position=i);
+  all.forEach((ch,i)=>{ch.position=i;});
   return all;
 }
 function contentRoot(doc) {
