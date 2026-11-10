@@ -38,7 +38,7 @@ function makeWork(a) {
   let title = clean(a.attr("title") || a.attr("aria-label") || a.attr("data-title") ||
     heading?.text() || img?.attr("alt") || a.text());
   if (title.length > 200) {
-    title = title.split(/بقلم:|الوصف:|آخر تحديث:|\\d+(?:\\.\\d+)?ك\\s+\\d+/u)[0];
+    title = title.split(/بقلم:|الوصف:|آخر تحديث:|\d+(?:\\.\d+)?ك\\s+\d+/u)[0];
     title = title.replace(/^(?:مستمرة|مكتملة|متوقفة|جديدة)\\s*/u, "").trim();
   }
   if (!title || title.length > 200) return null;
@@ -58,7 +58,22 @@ async function listing(paths) {
 }
 async function popular(offset) {
   const page=Math.floor(Number(offset||0)/PAGE_SIZE)+1;
-  return listing(["/?page="+page,"/latest?page="+page,"/novels?page="+page,"/popular?page="+page]);
+  const paths=[
+    "/?page="+page,
+    "/latest?page="+page,
+    "/novels?page="+page,
+    "/popular?page="+page
+  ];
+  const out=[], seen={};
+  for(const path of paths) {
+    try {
+      const found=works(await getDoc(path));
+      for(const w of found) {
+        if(!seen[w.id]) { seen[w.id]=1; out.push(w); }
+      }
+    } catch(_) {}
+  }
+  return out;
 }
 function norm(s) { return clean(s).toLocaleLowerCase().replace(/[ًٌٍَُِّْـ]/g,"").replace(/[إأآ]/g,"ا").replace(/ى/g,"ي").replace(/ة/g,"ه"); }
 async function search(query, offset) {
@@ -74,75 +89,111 @@ async function search(query, offset) {
   }
   return hits.slice((page-1)*PAGE_SIZE,page*PAGE_SIZE);
 }
+function toWesternDigits(value) {
+  return String(value || "").replace(/[٠-٩۰-۹]/g, ch => {
+    const ar = "٠١٢٣٤٥٦٧٨٩", fa = "۰۱۲۳۴۵۶۷۸۹";
+    const i = ar.indexOf(ch);
+    return String(i >= 0 ? i : fa.indexOf(ch));
+  });
+}
 function chapterNum(text,url) {
-  let m=String(text||"").match(/(?:الفصل|فصل|chapter|chap|ch\.?)[\s:#-]*(\d+(?:\.\d+)?)/iu);
-  if(m)return m[1];
-  m=String(url||"").match(/\/chapter(?:[-_\/]|-)(\d+(?:\.\d+)?)/i);
+  const t = toWesternDigits(text);
+  const u = toWesternDigits(url);
+  let m = t.match(/(?:الفصل|فصل|chapter|chap|ch\\.?)[\\s:#-]*(\\d+(?:\\.\\d+)?)/iu);
+  if (m) return m[1];
+  m = u.match(/\\/chapter(?:[-_\\/]|-)(\\d+(?:\\.\\d+)?)(?:[/?#-]|$)/i);
+  if (m) return m[1];
+  m = u.match(/\\/(\\d+(?:\\.\\d+)?)(?:[/?#]|$)/);
   return m ? m[1] : undefined;
 }
 function extractChapters(doc,id) {
-  const out=[],seen={};
+  const out=[], seen={};
   for(const a of doc.querySelectorAll("a[href]")) {
-    const href=a.attr("href")||"", u=abs(href)||"";
-    if(!u || !u.includes("riwayatarab.com") || !u.includes("/novel/"))continue;
-    if(/\/novel\/[^/]+\/chapters(?:[/?#]|$)/i.test(u))continue;
-    if(novelId(u)!==id)continue;
-    const text=clean(a.text()||a.attr("title")||a.attr("aria-label")||""), n=chapterNum(text,u);
-    if(!n)continue;
-    const cid=u.replace(/^https?:\/\/riwayatarab\.com/i,"");
-    if(seen[cid])continue;
+    const href=a.attr("href")||"";
+    const u=abs(href)||"";
+    if(!u || !/^https?:\\/\\/(?:www\\.)?riwayatarab\\.com\\//i.test(u)) continue;
+    if(!/\\/novel\\//i.test(u)) continue;
+    if(new URL(u).pathname.replace(/\\/$/,"").toLowerCase() === ("/novel/"+id+"/chapters").toLowerCase()) continue;
+    if(novelId(u)!==id) continue;
+    const text=clean(a.text()||a.attr("title")||a.attr("aria-label")||"");
+    const n=chapterNum(text,u);
+    if(!n) continue;
+    const path=new URL(u).pathname;
+    const cid=path;
+    if(seen[cid]) continue;
     seen[cid]=1;
     out.push({id:cid,chapter:n,title:text||("الفصل "+n)});
   }
   return out;
 }
-function pagination(doc) {
-  const p=[];
+function paginationLinks(doc, basePath) {
+  const links=[], seen={};
   for(const a of doc.querySelectorAll("a[href]")) {
-    const u=abs(a.attr("href")||"")||"";
-    const m=u.match(/[?&]page=(\d+)/i);
-    if(m)p.push(Number(m[1]));
+    const href=a.attr("href")||"";
+    if(!href) continue;
+    const u=abs(href);
+    if(!u) continue;
+    const url=new URL(u);
+    if(url.hostname.replace(/^www\\./,"")!=="riwayatarab.com") continue;
+    if(url.pathname.replace(/\\/$/,"")!==basePath.replace(/\\/$/,"")) continue;
+    if(!/[?&](?:page|p)=\\d+/i.test(url.search)) continue;
+    const key=url.pathname+url.search;
+    if(!seen[key]) { seen[key]=1; links.push(key); }
   }
-  return p;
+  return links;
 }
 async function chapters(id) {
-  const base="/novel/"+encodeURIComponent(id);
+  const novelPath="/novel/"+encodeURIComponent(id);
+  const indexPath=novelPath+"/chapters";
   const all=[], seen={};
-  function addFrom(doc) {
+  function add(doc) {
     for(const ch of extractChapters(doc,id)) {
       if(!seen[ch.id]) { seen[ch.id]=1; all.push(ch); }
     }
   }
 
-  // The novel page contains an initial chapter preview; retain it as a fallback.
-  try { addFrom(await getDoc(base)); } catch(_) {}
+  // The detail page contains a first-page preview (20 chapters on the verified novel).
+  try { add(await getDoc(novelPath)); } catch(_) {}
 
-  const indexPath=base+"/chapters";
   let first;
   try {
     first=await getDoc(indexPath);
-    addFrom(first);
+    add(first);
   } catch(_) {
-    all.sort((a,b)=>parseFloat(a.chapter)-parseFloat(b.chapter));
-    all.forEach((ch,i)=>{ch.position=i;});
+    all.sort((x,y)=>Number(x.chapter)-Number(y.chapter));
+    all.forEach((x,i)=>{x.position=i;});
     return all;
   }
 
-  const pages=pagination(first), max=pages.length?Math.max(...pages):1;
+  const queued=paginationLinks(first,indexPath);
+  const visited={};
+  // Prefer pagination URLs actually emitted by the site.
+  for(const path of queued) {
+    if(visited[path]) continue;
+    visited[path]=1;
+    try { add(await getDoc(path)); } catch(_) {}
+  }
+
+  // Fallback for sites whose pagination links are not exposed in server HTML.
+  const maxPage=200;
   let empty=0;
-  for(let p=2;p<=Math.max(200,max+2);p++) {
+  for(let p=2;p<=maxPage;p++) {
+    const path=indexPath+"?page="+p;
+    if(visited[path]) continue;
     try {
-      const doc=await getDoc(indexPath+"?page="+p);
+      const doc=await getDoc(path);
       const before=all.length;
-      addFrom(doc);
-      if(all.length===before)empty++;else empty=0;
-      if(p>max && empty>=3)break;
+      add(doc);
+      if(all.length===before) empty++; else empty=0;
+      if(empty>=3) break;
     } catch(_) {
-      if(p>max) {empty++; if(empty>=3)break;}
+      empty++;
+      if(empty>=3) break;
     }
   }
-  all.sort((a,b)=>parseFloat(a.chapter)-parseFloat(b.chapter));
-  all.forEach((ch,i)=>{ch.position=i;});
+
+  all.sort((x,y)=>Number(x.chapter)-Number(y.chapter));
+  all.forEach((x,i)=>{x.position=i;});
   return all;
 }
 function contentRoot(doc) {
