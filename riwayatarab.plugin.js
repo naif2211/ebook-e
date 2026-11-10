@@ -33,9 +33,16 @@ function imageUrl(img) {
 function makeWork(a) {
   const id = novelId(a.attr("href") || "");
   if (!id) return null;
-  let title = clean(a.attr("title") || a.attr("aria-label") || a.querySelector("img")?.attr("alt") || a.text());
+  const img = a.querySelector("img");
+  const heading = a.querySelector("h1,h2,h3,h4,.novel-title,.book-title,.title,[class*='title']");
+  let title = clean(a.attr("title") || a.attr("aria-label") || a.attr("data-title") ||
+    heading?.text() || img?.attr("alt") || a.text());
+  if (title.length > 200) {
+    title = title.split(/بقلم:|الوصف:|آخر تحديث:|\\d+(?:\\.\\d+)?ك\\s+\\d+/u)[0];
+    title = title.replace(/^(?:مستمرة|مكتملة|متوقفة|جديدة)\\s*/u, "").trim();
+  }
   if (!title || title.length > 200) return null;
-  return { id, title, cover: imageUrl(a.querySelector("img")), siteUrl: BASE + "/novel/" + encodeURIComponent(id) };
+  return { id, title, cover: imageUrl(img), siteUrl: BASE + "/novel/" + encodeURIComponent(id) };
 }
 function works(doc) {
   const out=[], seen={};
