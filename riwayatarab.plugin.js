@@ -38,8 +38,8 @@ function makeWork(a) {
   let title = clean(a.attr("title") || a.attr("aria-label") || a.attr("data-title") ||
     heading?.text() || img?.attr("alt") || a.text());
   if (title.length > 200) {
-    title = title.split(/بقلم:|الوصف:|آخر تحديث:|\d+(?:\\.\d+)?ك\\s+\d+/u)[0];
-    title = title.replace(/^(?:مستمرة|مكتملة|متوقفة|جديدة)\\s*/u, "").trim();
+    title = title.split(/بقلم:|الوصف:|آخر تحديث:|\d+(?:\.\d+)?ك\s+\d+/u)[0];
+    title = title.replace(/^(?:مستمرة|مكتملة|متوقفة|جديدة)\s*/u, "").trim();
   }
   if (!title || title.length > 200) return null;
   return { id, title, cover: imageUrl(img), siteUrl: BASE + "/novel/" + encodeURIComponent(id) };
@@ -99,11 +99,11 @@ function toWesternDigits(value) {
 function chapterNum(text,url) {
   const t = toWesternDigits(text);
   const u = toWesternDigits(url);
-  let m = t.match(/(?:الفصل|فصل|chapter|chap|ch\\.?)[\\s:#-]*(\\d+(?:\\.\\d+)?)/iu);
+  let m = t.match(/(?:الفصل|فصل|chapter|chap|ch\.?)[\s:#-]*(\d+(?:\.\d+)?)/iu);
   if (m) return m[1];
-  m = u.match(/\\/chapter(?:[-_\\/]|-)(\\d+(?:\\.\\d+)?)(?:[/?#-]|$)/i);
+  m = u.match(/\/chapter(?:[-_\/]|-)(\d+(?:\.\d+)?)(?:[/?#-]|$)/i);
   if (m) return m[1];
-  m = u.match(/\\/(\\d+(?:\\.\\d+)?)(?:[/?#]|$)/);
+  m = u.match(/\/(\d+(?:\.\d+)?)(?:[/?#]|$)/);
   return m ? m[1] : undefined;
 }
 function extractChapters(doc,id) {
@@ -111,9 +111,9 @@ function extractChapters(doc,id) {
   for(const a of doc.querySelectorAll("a[href]")) {
     const href=a.attr("href")||"";
     const u=abs(href)||"";
-    if(!u || !/^https?:\\/\\/(?:www\\.)?riwayatarab\\.com\\//i.test(u)) continue;
-    if(!/\\/novel\\//i.test(u)) continue;
-    if(new URL(u).pathname.replace(/\\/$/,"").toLowerCase() === ("/novel/"+id+"/chapters").toLowerCase()) continue;
+    if(!u || !/^https?:\/\/(?:www\.)?riwayatarab\.com\//i.test(u)) continue;
+    if(!/\/novel\//i.test(u)) continue;
+    if(new URL(u).pathname.replace(/\/$/,"").toLowerCase() === ("/novel/"+id+"/chapters").toLowerCase()) continue;
     if(novelId(u)!==id) continue;
     const text=clean(a.text()||a.attr("title")||a.attr("aria-label")||"");
     const n=chapterNum(text,u);
@@ -134,9 +134,9 @@ function paginationLinks(doc, basePath) {
     const u=abs(href);
     if(!u) continue;
     const url=new URL(u);
-    if(url.hostname.replace(/^www\\./,"")!=="riwayatarab.com") continue;
-    if(url.pathname.replace(/\\/$/,"")!==basePath.replace(/\\/$/,"")) continue;
-    if(!/[?&](?:page|p)=\\d+/i.test(url.search)) continue;
+    if(url.hostname.replace(/^www\./,"")!=="riwayatarab.com") continue;
+    if(url.pathname.replace(/\/$/,"")!==basePath.replace(/\/$/,"")) continue;
+    if(!/[?&](?:page|p)=\d+/i.test(url.search)) continue;
     const key=url.pathname+url.search;
     if(!seen[key]) { seen[key]=1; links.push(key); }
   }
