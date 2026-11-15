@@ -1,5 +1,5 @@
 // Harbor eBook source for RiwayatArab
-// v1.8.8 - tolerant chapter-link extraction for Harbor parsed pages.
+// v1.8.9 - tolerant chapter-link extraction for Harbor parsed pages.
 const BASE = "https://riwayatarab.com";
 const PAGE_SIZE = 20;
 
@@ -119,36 +119,36 @@ function queryValue(q,key) {
 }
 function extractChapters(doc,id) {
   const out=[], seen={};
-  const slug=String(id||"").toLowerCase();
-  // RiwayatArab renders chapter links as /novel/<slug>/chapter/<number>.
-  // Do not depend on the anchor's displayed text or on an exact hostname:
-  // both can vary in Harbor's parsed server-side HTML.
-  for(const a of doc.querySelectorAll("a[href]")) {
-    const raw=a.attr("href")||"";
-    const u=abs(raw)||"";
-    const path=urlPath(u).replace(/\/$/,"");
+  const slug=String(id||"").toLowerCase().replace(/^\/+|\/+$/g,"");
+  const expected="/novel/"+slug+"/chapter/";
+  function add(raw,text,title) {
+    if(!raw) return;
+    const u=abs(raw);
+    if(!u) return;
+    const path=urlPath(u).replace(/\/+$/,"");
     const lower=path.toLowerCase();
-    if(!lower.includes("/novel/"+slug+"/")) continue;
-    if(!/(?:^|\/)(?:chapter|chap|ch)(?:\/|-|_)/i.test(path)) continue;
-    const n=chapterNum(a.text()||a.attr("title")||a.attr("aria-label")||"",path);
-    if(!n) continue;
+    const at=lower.indexOf(expected);
+    if(at<0) return;
+    const tail=path.slice(at+expected.length);
+    const m=tail.match(/^(\d+(?:\.\d+)?)(?:\/|$)/);
+    if(!m) return;
+    const number=String(Number(toWesternDigits(m[1])));
     const key=path.toLowerCase();
-    if(seen[key]) continue;
+    if(seen[key]) return;
     seen[key]=1;
-    out.push({id:path,chapter:n,title:clean(a.text()||a.attr("title")||"الفصل "+n)});
+    const label=clean(text||title||"");
+    out.push({id:path,chapter:number,title:label||("الفصل "+number)});
   }
-  // Fallback: some rendered pages expose chapter URLs in data attributes.
-  if(!out.length) {
-    for(const node of doc.querySelectorAll("[data-href],[data-url],[data-chapter-url]")) {
-      const raw=node.attr("data-href")||node.attr("data-url")||node.attr("data-chapter-url")||"";
-      const path=urlPath(raw).replace(/\/$/,"");
-      if(!path.toLowerCase().includes("/novel/"+slug+"/")) continue;
-      const n=chapterNum(node.text(),path);
-      if(!n || !/(?:^|\/)(?:chapter|chap|ch)(?:\/|-|_)/i.test(path)) continue;
-      if(seen[path.toLowerCase()]) continue;
-      seen[path.toLowerCase()]=1;
-      out.push({id:path,chapter:n,title:clean(node.text())||("الفصل "+n)});
-    }
+
+  // Read the URL itself for the chapter number; anchor text on this site
+  // repeats the title and may contain word-count text after it.
+  for(const a of doc.querySelectorAll("a")) {
+    const href=a.attr("href")||a.attr("data-href")||a.attr("data-url")||"";
+    add(href,a.text(),a.attr("title")||a.attr("aria-label"));
+  }
+  for(const node of doc.querySelectorAll("[data-href],[data-url],[data-chapter-url]")) {
+    add(node.attr("data-href")||node.attr("data-url")||node.attr("data-chapter-url"),
+        node.text(),node.attr("title")||node.attr("aria-label"));
   }
   return out;
 }
