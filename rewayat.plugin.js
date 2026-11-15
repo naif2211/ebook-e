@@ -27,19 +27,11 @@ function abs(url) {
 
 function imageFrom(node) {
   if (!node) return undefined;
-  const srcset = node.attr("data-srcset") || node.attr("srcset") || "";
-  const firstSrcset = srcset.split(",")[0]?.trim().split(/\\s+/)[0];
-  const style = node.attr("style") || "";
-  const background = style.match(/background-image\\s*:\\s*url\\((['"]?)(.*?)\\1\\)/i)?.[2];
   return abs(
     node.attr("data-src") ||
     node.attr("data-lazy-src") ||
     node.attr("data-original") ||
-    node.attr("data-image") ||
-    node.attr("data-cfsrc") ||
-    node.attr("src") ||
-    firstSrcset ||
-    background
+    node.attr("src")
   );
 }
 
@@ -78,7 +70,7 @@ function cardToSummary(a) {
   return {
     id,
     title,
-    cover,
+    cover: imageFrom(a.querySelector("img")),
     status,
     originalLanguage: "ar",
     isFanMade: false
@@ -90,7 +82,7 @@ async function libraryPage(page) {
   const found = [];
   const seen = new Set();
   for (const a of doc.querySelectorAll("a")) {
-    const item = cardToSummary(a, doc);
+    const item = cardToSummary(a);
     if (item && !seen.has(item.id)) {
       seen.add(item.id);
       found.push(item);
@@ -106,28 +98,6 @@ function getNovelTitle(doc, id) {
 function chapterTotal(text) {
   const m = (text || "").match(/الفصول\s*\(\s*([\d,،]+)/);
   return m ? Number(m[1].replace(/[،,]/g, "")) : undefined;
-}
-
-function chapterPageCount(doc, total) {
-  let pages = maxPage(doc);
-  const text = ((doc.querySelector("body") || doc).text() || "").replace(/\\s+/g, " ");
-  const explicit = text.match(/الصفحة\\s*\\d+\\s*من\\s*(\\d+)/);
-  if (explicit) pages = Math.max(pages, Number(explicit[1]) || 1);
-  // The site displays 20 chapter rows per page.
-  if (total) pages = Math.max(pages, Math.ceil(total / PAGE_SIZE));
-  return Math.max(1, Math.min(pages, 500));
-}
-
-async function getDocRetry(path, attempts = 4) {
-  let lastError;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return await getDoc(path);
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError;
 }
 
 function chapterLinks(doc, id) {
@@ -236,18 +206,21 @@ const plugin = {
   },
 
   async chapters(id) {
-    const first = await getDocRetry("/novel/" + id);
-    const body = ((first.querySelector("body") || first).text() || "").replace(/\\s+/g, " ");
+    const first = await getDoc("/novel/" + id);
+    const body = ((first.querySelector("body") || first).text() || "").replace(/\s+/g, " ");
     const total = chapterTotal(body);
-    const pages = chapterPageCount(first, total);
+    let pages = maxPage(first);
+
+    // The novel page exposes the actual chapter URLs. Use the chapter count only
+    // to determine pagination depth; never invent missing chapter records.
+    if (pages === 1 && total) pages = Math.ceil(total / PAGE_SIZE);
+    pages = Math.min(Math.max(pages, 1), 300);
 
     let records = chapterLinks(first, id);
-    // Fetch every chapter-list page. Small batches with retries avoid losing pages
-    // when the host temporarily rate-limits parallel requests.
-    for (let start = 2; start <= pages; start += 2) {
+    for (let start = 2; start <= pages; start += 5) {
       const batch = [];
-      for (let p = start; p < start + 2 && p <= pages; p++) {
-        batch.push(getDocRetry("/novel/" + id + "?page=" + p, 4).catch(() => null));
+      for (let p = start; p < start + 5 && p <= pages; p++) {
+        batch.push(getDoc("/novel/" + id + "?page=" + p).catch(() => null));
       }
       const docs = await Promise.all(batch);
       for (const doc of docs) {
