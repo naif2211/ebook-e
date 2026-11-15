@@ -1,264 +1,253 @@
-// Harbor eBook source for RiwayatArab
-// v1.8.9 - tolerant chapter-link extraction for Harbor parsed pages.
+// Harbor eBook source plugin for رواياتعرب (riwayatarab.com).
+//
+// Verified from the live site: URL structure, pagination, chapter-list paging, and the
+// watermark lines inside chapters. Written from the rendered page text, NOT the raw HTML:
+// the CSS class names are unknown, so selectors are anchor-href based with text parsing.
+// Lines marked CHECK are the ones most likely to need adjusting after a first test run.
+
 const BASE = "https://riwayatarab.com";
-const PAGE_SIZE = 20;
+const PAGE = 20; // /latest shows 20 novels per page
+const CH_PAGE = 50; // /novel/<slug>/chapters shows 50 chapters per page
 
 async function getDoc(path) {
-  const url = /^https?:\/\//i.test(path) ? path : BASE + (path.startsWith("/") ? path : "/" + path);
-  const res = await harbor.http(url, { responseType: "text", timeoutMs: 30000 });
-  if (!res.ok) throw new Error("HTTP " + res.status);
+  const res = await harbor.http(BASE + path, { responseType: "text" });
+  if (!res.ok) throw new Error("http " + res.status + " for " + path);
   return harbor.parseHtml(res.body);
 }
-function abs(v) {
-  if (!v) return undefined;
-  v = String(v).trim();
-  if (/^https?:\/\//i.test(v)) return v;
-  if (v.startsWith("//")) return "https:" + v;
-  return v.startsWith("/") ? BASE + v : BASE + "/" + v;
+
+function abs(url) {
+  if (!url) return undefined;
+  if (/^https?:\/\//i.test(url)) return url;
+  if (url.startsWith("//")) return "https:" + url;
+  if (url.startsWith("/")) return BASE + url;
+  return BASE + "/" + url;
 }
-function clean(v) { return String(v || "").replace(/\u00a0/g," ").replace(/[ \t]+/g," ").trim(); }
-function novelId(href) {
-  const u = abs(href) || "";
-  const m = u.match(/\/novel\/([^/?#]+)/i);
-  return m ? decodeURIComponent(m[1]) : "";
+
+// Hrefs may be relative or absolute (https://riwayatarab.com/...). Always reduce to a path.
+function path(href) {
+  return (href || "").replace(/^https?:\/\/[^/]+/i, "").replace(/#.*$/, "");
 }
-function imageUrl(img) {
-  if (!img) return undefined;
-  for (const a of ["data-src","data-lazy-src","data-original","data-cover","src"]) {
-    const v = img.attr(a);
-    if (v && !/^data:/i.test(v) && !/placeholder|transparent|spacer|blank/i.test(v)) return abs(v);
+
+// Fetch with retries so one flaky request does not wipe out a whole list.
+async function getDocRetry(p, tries = 3) {
+  let err;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await getDoc(p);
+    } catch (e) {
+      err = e;
+    }
   }
-  return undefined;
+  throw err;
 }
-function makeWork(a) {
-  const id = novelId(a.attr("href") || "");
-  if (!id) return null;
+
+const STATUS = { "مستمرة": "ongoing", "مكتملة": "completed", "متوقفة": "hiatus" };
+const STATUS_RE = /(مستمرة|مكتملة|متوقفة)/;
+
+const stripMarks = (s) => (s || "").replace(/[\u064B-\u065F\u0670\u0640]/g, "");
+
+// Novel cards on /latest: one <a href="/novel/<slug>"> whose text is
+// "<title> <status> <title> بقلم: <author> <synopsis> <genre> <views> <chapters> 0 آخر تحديث: <date>"
+function cardToSummary(a) {
+  const href = path(a.attr("href"));
+  if (!/^\/novel\/[^/?]+\/?$/.test(href)) return null;
+  const text = (a.text() || "").replace(/\s+/g, " ").trim();
+  if (!text) return null;
+
+  const st = text.match(STATUS_RE);
+  // On /latest the status is rendered BEFORE the novel title (e.g. "مستمرة عبد الظل").
+  // Some cards put the title first, so support both orders.
+  let title;
+  if (st) {
+    const before = text.slice(0, st.index).trim();
+    const after = text.slice(st.index + st[0].length).trim();
+    title = before || after.split(/بقلم\\s*:/)[0].trim();
+  } else {
+    title = text.split(/بقلم\\s*:/)[0].trim();
+  }
+  title = title.replace(/^(?:مستمرة|مكتملة|متوقفة)\\s*/u, "").trim();
+  if (!title) return null;
+
+  const tail = text.match(/([\d.,]+\s?[كKM]?)\s+(\d+)\s+\d+\s+آخر تحديث/);
   const img = a.querySelector("img");
-  const heading = a.querySelector("h1,h2,h3,h4,.novel-title,.book-title,.title,[class*='title']");
-  let title = clean(a.attr("title") || a.attr("aria-label") || a.attr("data-title") ||
-    heading?.text() || img?.attr("alt") || a.text());
-  if (title.length > 200) {
-    title = title.split(/بقلم:|الوصف:|آخر تحديث:|\d+(?:\.\d+)?ك\s+\d+/u)[0];
-    title = title.replace(/^(?:مستمرة|مكتملة|متوقفة|جديدة)\s*/u, "").trim();
-  }
-  if (!title || title.length > 200) return null;
-  return { id, title, cover: imageUrl(img), siteUrl: BASE + "/novel/" + encodeURIComponent(id) };
+
+  return {
+    id: href.replace(/^\/novel\//, "").replace(/\/$/, ""),
+    title,
+    cover: abs(img?.attr("data-src") || img?.attr("data-lazy-src") || img?.attr("data-original") || img?.attr("src")),
+    status: st ? STATUS[st[1]] : undefined,
+    chapters: tail ? Number(tail[2]) || undefined : undefined,
+    trendingScore: undefined,
+    isFanMade: false,
+  };
 }
-function works(doc) {
-  const out=[], seen={};
-  for (const a of doc.querySelectorAll("a[href*='/novel/']")) {
-    const w=makeWork(a);
-    if (w && !seen[w.id]) { seen[w.id]=1; out.push(w); }
+
+async function latestPage(page) {
+  const doc = await getDocRetry("/latest?page=" + page);
+  const seen = new Set();
+  const out = [];
+  for (const a of doc.querySelectorAll("a")) {
+    const s = cardToSummary(a);
+    if (s && !seen.has(s.id)) {
+      seen.add(s.id);
+      out.push(s);
+    }
   }
   return out;
 }
-async function listing(paths) {
-  for (const p of paths) { try { const d=await getDoc(p), w=works(d); if(w.length)return w; } catch(_){} }
-  return [];
-}
-async function popular(offset) {
-  const off=Math.max(0,Number(offset||0));
-  const page=Math.floor(off/PAGE_SIZE)+1;
-  const paths=page===1 ? ["/","/latest"] : ["/latest?page="+page,"/?page="+page];
-  const out=[], seen={};
-  for(const path of paths) {
-    try {
-      const found=works(await getDoc(path));
-      for(const w of found) if(!seen[w.id]) { seen[w.id]=1; out.push(w); }
-    } catch(_) {}
-  }
-  return out.slice(0,PAGE_SIZE);
-}
-function norm(s) { return clean(s).toLocaleLowerCase().replace(/[ًٌٍَُِّْـ]/g,"").replace(/[إأآ]/g,"ا").replace(/ى/g,"ي").replace(/ة/g,"ه"); }
-async function search(query, offset) {
-  const q=clean(query); if(!q)return [];
-  const page=Math.floor(Number(offset||0)/PAGE_SIZE)+1, e=encodeURIComponent(q);
-  const direct=await listing(["/search?q="+e+"&page="+page,"/search?query="+e+"&page="+page,"/search?keyword="+e+"&page="+page]);
-  if(direct.length)return direct;
-  const needle=norm(q), hits=[], seen={};
-  for(let p=1;p<=100;p++) {
-    const w=await listing(["/latest?page="+p,"/novels?page="+p,"/?page="+p]);
-    if(!w.length)break;
-    for(const x of w) if(!seen[x.id] && norm(x.title).includes(needle)) {seen[x.id]=1;hits.push(x);}
-  }
-  return hits.slice((page-1)*PAGE_SIZE,page*PAGE_SIZE);
-}
-function toWesternDigits(value) {
-  return String(value || "").replace(/[٠-٩۰-۹]/g, ch => {
-    const ar = "٠١٢٣٤٥٦٧٨٩", fa = "۰۱۲۳۴۵۶۷۸۹";
-    const i = ar.indexOf(ch);
-    return String(i >= 0 ? i : fa.indexOf(ch));
-  });
-}
-function chapterNum(text,url) {
-  const t=toWesternDigits(clean(text));
-  const u=toWesternDigits(String(url||""));
-  let m=t.match(/(?:الفصل|فصل|رقم\s*الفصل|chapter|chap|ch\.?)[\s:#._-]*(\d+(?:\.\d+)?)/iu);
-  if(m) return String(Number(m[1]));
-  m=u.match(/\/(?:chapter|chap|ch)[-_\/]?(\d+(?:\.\d+)?)(?:[-_/?.#]|$)/i);
-  if(m) return String(Number(m[1]));
-  m=u.match(/(?:chapter|chap|ch)[-_](\d+(?:\.\d+)?)(?:[-_/?.#]|$)/i);
-  if(m) return String(Number(m[1]));
-  return undefined;
-}
-function urlPath(v) {
-  const s=abs(v)||"";
-  const m=s.match(/^https?:\/\/[^/]+([^?#]*)/i);
-  return (m?m[1]:s.split(/[?#]/)[0])||"/";
-}
-function urlQuery(v) {
-  const s=String(v||""), q=s.indexOf("?");
-  return q<0?"":s.slice(q+1).split("#")[0];
-}
-function queryValue(q,key) {
-  for(const part of String(q||"").split("&")) {
-    const pair=part.split("=");
-    if(pair[0]===key && /^\d+$/.test(pair[1]||"")) return Number(pair[1]);
-  }
-  return 0;
-}
-function extractChapters(doc,id) {
-  const out=[], seen={};
-  const slug=String(id||"").toLowerCase().replace(/^\/+|\/+$/g,"");
-  const expected="/novel/"+slug+"/chapter/";
-  function add(raw,text,title) {
-    if(!raw) return;
-    const u=abs(raw);
-    if(!u) return;
-    const path=urlPath(u).replace(/\/+$/,"");
-    const lower=path.toLowerCase();
-    const at=lower.indexOf(expected);
-    if(at<0) return;
-    const tail=path.slice(at+expected.length);
-    const m=tail.match(/^(\d+(?:\.\d+)?)(?:\/|$)/);
-    if(!m) return;
-    const number=String(Number(toWesternDigits(m[1])));
-    const key=path.toLowerCase();
-    if(seen[key]) return;
-    seen[key]=1;
-    const label=clean(text||title||"");
-    out.push({id:path,chapter:number,title:label||("الفصل "+number)});
-  }
 
-  // Read the URL itself for the chapter number; anchor text on this site
-  // repeats the title and may contain word-count text after it.
-  for(const a of doc.querySelectorAll("a")) {
-    const href=a.attr("href")||a.attr("data-href")||a.attr("data-url")||"";
-    add(href,a.text(),a.attr("title")||a.attr("aria-label"));
-  }
-  for(const node of doc.querySelectorAll("[data-href],[data-url],[data-chapter-url]")) {
-    add(node.attr("data-href")||node.attr("data-url")||node.attr("data-chapter-url"),
-        node.text(),node.attr("title")||node.attr("aria-label"));
-  }
-  return out;
+// Chapter body: keep DOM order, drop the site's injected watermark / promo lines.
+function isJunk(line) {
+  const flat = line.replace(/[\s*_\-]/g, "");
+  return (
+    /حقوق\$\$.*\$\$/.test(flat) ||
+    /عالمالروايات/.test(flat) ||
+    /kol?no?vel/i.test(flat) ||
+    /مو.?قع.?ملوك/.test(flat) ||
+    /موقعكالمفضللقراءة/.test(flat) ||
+    /جميعالحقوقمحفوظة/.test(flat)
+  );
 }
-function paginationLinks(doc,basePath) {
-  const links=[],seen={},base=basePath.replace(/\/$/,"").toLowerCase();
-  for(const a of doc.querySelectorAll("a[href]")) {
-    const u=abs(a.attr("href")||"");
-    if(!u || !/^https?:\/\/(?:www\.)?riwayatarab\.com\//i.test(u)) continue;
-    const path=urlPath(u).replace(/\/$/,"");
-    if(path.toLowerCase()!==base) continue;
-    const q=urlQuery(u), page=queryValue(q,"page")||queryValue(q,"p");
-    if(page<2) continue;
-    const key=path+"?page="+page;
-    if(!seen[key]) {seen[key]=1;links.push(key);}
-  }
-  links.sort((a,b)=>queryValue(urlQuery(a),"page")-queryValue(urlQuery(b),"page"));
-  return links;
-}
-async function chapters(id) {
-  const slug = novelId(id) || clean(id).replace(/^\/+|\/+$/g, "");
-  if (!slug) return [];
-  const indexPath = "/novel/" + encodeURIComponent(slug) + "/chapters";
-  const orderedIndexPath = indexPath + "?order=desc";
-  const all = [], seen = {};
-  function add(doc) {
-    for (const ch of extractChapters(doc, slug)) {
-      if (!seen[ch.id]) { seen[ch.id] = 1; all.push(ch); }
-    }
-  }
 
-  let first;
-  try {
-    first = await getDoc(orderedIndexPath);
-    add(first);
-  } catch (_) {
-    try { add(await getDoc("/novel/" + encodeURIComponent(slug))); } catch (_) {}
-    all.sort((a,b) => Number(a.chapter) - Number(b.chapter));
-    all.forEach((x,i) => { x.position = i; });
-    return all;
-  }
+const plugin = {
+  id: "riwayatarab",
+  name: "رواياتعرب",
 
-  // The index reports its total page count (50 chapters per page).
-  const pageText = clean(first.text());
-  const pageMatch = pageText.match(/الصفحة\s*\d+\s*من\s*(\d+)/u);
-  let totalPages = pageMatch ? Number(pageMatch[1]) : 0;
-
-  // Fallback to the pagination anchors if the page-count label is absent.
-  if (!totalPages) {
-    for (const link of paginationLinks(first, indexPath)) {
-      const n = queryValue(urlQuery(link), "page");
-      if (n > totalPages) totalPages = n;
-    }
-  }
-  if (!totalPages || !Number.isFinite(totalPages)) totalPages = 100;
-  totalPages = Math.max(1, Math.min(totalPages, 200));
-
-  let emptyPages = 0;
-  for (let page = 2; page <= totalPages; page++) {
-    try {
-      let doc;
-      try { doc = await getDoc(indexPath + "?order=desc&page=" + page); }
-      catch (_) { doc = await getDoc(indexPath + "?page=" + page); }
-      const before = all.length;
-      add(doc);
-      if (all.length === before) emptyPages++;
-      else emptyPages = 0;
-      if (!pageMatch && emptyPages >= 3) break;
-    } catch (_) {
-      emptyPages++;
-      if (!pageMatch && emptyPages >= 3) break;
-    }
-  }
-
-  all.sort((a,b) => Number(a.chapter) - Number(b.chapter));
-  all.forEach((x,i) => { x.position = i; });
-  return all;
-}
-function contentRoot(doc) {
-  for(const s of [".chapter-content",".reading-content",".entry-content","[class*='chapter-content']","[class*='reading-content']","article .prose","article","main"]) {
-    const n=doc.querySelector(s);
-    if(n && clean(n.text()).length>100)return n;
-  }
-  return null;
-}
-function chapterContent(root) {
-  if(!root)return "";
-  const out=[];
-  const nodes=root.querySelectorAll("p,blockquote");
-  if(nodes.length) {
-    for(const n of nodes) { const t=clean(n.text()); if(t)out.push(t); }
-  } else return clean(root.text());
-  return out.join("\n\n");
-}
-const provider={
-  id:"riwayatarab",
-  name:"رواياتعرب",
-  async popular(offset){return popular(offset);},
-  async search(query,offset){return search(query,offset);},
-  async detail(id){
-    const d=await getDoc("/novel/"+encodeURIComponent(id));
-    const title=clean(d.querySelector("h1")?.text()||id);
-    const img=d.querySelector("img[data-src],img[data-lazy-src],img[data-cover],img[src]");
-    const desc=clean(d.querySelector("[class*='description'],[class*='summary'],.prose")?.text());
-    return {id,title,cover:imageUrl(img),description:desc||undefined,siteUrl:BASE+"/novel/"+encodeURIComponent(id)};
+  // /latest is server-rendered. /search?sort=views is client-rendered, so it can't be scraped.
+  async popular(offset, tagId) {
+    const page = Math.floor(offset / PAGE) + 1;
+    return latestPage(page);
   },
-  async chapters(id){return chapters(id);},
-  async content(chapterId){
-    const d=await getDoc(chapterId);
-    const root=contentRoot(d);
-    return chapterContent(root)||clean(d.text());
-  }
+
+  // /search is client-rendered (empty HTML), so there is no HTML to parse. Fallback: scan
+  // /latest pages (37 of them, ~740 novels) in small parallel batches and filter by title.
+  // Replace this once you find the JSON endpoint the search page calls (DevTools > Network).
+  async search(query, offset, tagId) {
+    if (offset > 0) return []; // all matches are returned on the first call
+    const q = stripMarks(query).toLowerCase().trim();
+    if (!q) return [];
+    const doc1 = await getDoc("/latest");
+    const last = Math.max(
+      1,
+      ...doc1
+        .querySelectorAll("a")
+        .map((a) => path(a.attr("href")).match(/^\/latest\?page=(\d+)/))
+        .filter(Boolean)
+        .map((m) => Number(m[1])),
+    );
+    const hits = [];
+    const seen = new Set();
+    for (let start = 1; start <= last; start += 6) {
+      const batch = [];
+      for (let p = start; p < start + 6 && p <= last; p++) batch.push(latestPage(p).catch(() => []));
+      for (const list of await Promise.all(batch)) {
+        for (const s of list) {
+          if (!seen.has(s.id) && stripMarks(s.title).toLowerCase().includes(q)) {
+            seen.add(s.id);
+            hits.push(s);
+          }
+        }
+      }
+    }
+    return hits;
+  },
+
+  async detail(id) {
+    const doc = await getDoc("/novel/" + id);
+    const title = doc.querySelector("h1")?.text()?.trim();
+    if (!title) return null;
+    const body = ((doc.querySelector("body") || doc).text?.() || "").replace(/\s+/g, " ");
+
+    const st = body.match(STATUS_RE);
+    const author = body.match(/بقلم:\s*(.+?)\s+[\d.,]+\s?[كKM]?\s*مشاهدة/)?.[1]?.trim();
+    const total = body.match(/(\d+)\s*فصل/)?.[1];
+    // CHECK: if text() collapses differently, fall back to the (truncated) meta description.
+    const description =
+      body.match(/نبذة عن الرواية\s*(.+?)\s*قائمة الفصول/)?.[1]?.trim() ||
+      doc.querySelector("meta[name='description']")?.attr("content");
+
+    const imgs = doc.querySelectorAll("img");
+    const poster = imgs.find((i) => (i.attr("alt") || "").trim() === title) || imgs[0];
+    const cover =
+      abs(poster?.attr("src")) || abs(doc.querySelector("meta[property='og:image']")?.attr("content"));
+
+    const genres = doc
+      .querySelectorAll("a")
+      .filter((a) => path(a.attr("href")).includes("/search?category="))
+      .map((a) => a.text().trim())
+      .filter(Boolean);
+
+    return {
+      id,
+      title,
+      cover,
+      description,
+      status: st ? STATUS[st[1]] : undefined,
+      author: author && author !== "غير محدد" ? author : undefined, // "غير محدد" = "unspecified"
+      chapters: total ? Number(total) : undefined,
+      originalLanguage: "ar",
+      genres,
+    };
+  },
+
+  // /novel/<slug>/chapters?page=N, 50 per page, ascending by default.
+  async chapters(id) {
+    const base = "/novel/" + id;
+    const first = await getDocRetry(base + "/chapters");
+    const firstText = ((first.querySelector("body") || first).text?.() || "").replace(/\s+/g, " ");
+    const pageCount = Math.max(1, Number(firstText.match(/الصفحة\s*\d+\s*من\s*(\d+)/)?.[1]) || 1);
+    const total = Number(firstText.match(/(\d+)\s*فصل/)?.[1]) || 0;
+
+    const docs = [first];
+    for (let p = 2; p <= pageCount; p++) {
+      try {
+        docs.push(await getDocRetry(base + "/chapters?page=" + p));
+      } catch (e) {
+        // skip a failed page; the fallback below fills any gap
+      }
+    }
+
+    const byNum = new Map();
+    for (const doc of docs) {
+      for (const a of doc.querySelectorAll("a")) {
+        const href = path(a.attr("href"));
+        const m = href.match(/\/chapter\/(\d+)\/?$/);
+        if (!m) continue;
+        const n = Number(m[1]);
+        if (byNum.has(n)) continue;
+        const text = (a.text() || "").replace(/\s+/g, " ").trim();
+        const views = text.match(/\s(\d[\d.,]*\s?[كKM]?)$/)?.[1];
+        byNum.set(n, { n, id: href.replace(/^\//, ""), views });
+      }
+    }
+
+    // Fallback: chapter URLs are predictable (/novel/<slug>/chapter/<n>), so fill gaps / empty lists.
+    const max = Math.max(total, ...byNum.keys(), 0);
+    for (let n = 1; n <= max; n++) {
+      if (!byNum.has(n)) byNum.set(n, { n, id: "novel/" + id + "/chapter/" + n });
+    }
+
+    return [...byNum.values()]
+      .sort((x, y) => x.n - y.n)
+      .map((c, position) => ({
+        id: c.id,
+        chapter: String(c.n),
+        position,
+        title: "الفصل " + c.n,
+        pages: 0,
+        language: "ar",
+        views: c.views || undefined,
+      }));
+  },
+
+  async content(chapterId) {
+    const doc = await getDoc("/" + chapterId);
+    // CHECK: assumes prose is in <p>. If a chapter comes back empty, inspect the real container.
+    const scope = doc.querySelector("article") || doc.querySelector("main") || doc;
+    let lines = scope.querySelectorAll("p").map((p) => p.text().trim());
+    if (!lines.some(Boolean)) {
+      lines = (scope.text() || "").split(/\n+/).map((l) => l.trim());
+    }
+    return lines.filter((l) => l && !isJunk(l)).join("\n\n");
+  },
 };
-harbor.register(provider);
