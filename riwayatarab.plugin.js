@@ -61,11 +61,11 @@ function cardToSummary(a) {
   if (st) {
     const before = text.slice(0, st.index).trim();
     const after = text.slice(st.index + st[0].length).trim();
-    title = before || after.split(/بقلم\\s*:/)[0].trim();
+    title = before || after.split(/بقلم\s*:/)[0].trim();
   } else {
-    title = text.split(/بقلم\\s*:/)[0].trim();
+    title = text.split(/بقلم\s*:/)[0].trim();
   }
-  title = title.replace(/^(?:مستمرة|مكتملة|متوقفة)\\s*/u, "").trim();
+  title = title.replace(/^(?:مستمرة|مكتملة|متوقفة)\s*/u, "").trim();
   if (!title) return null;
 
   const tail = text.match(/([\d.,]+\s?[كKM]?)\s+(\d+)\s+\d+\s+آخر تحديث/);
