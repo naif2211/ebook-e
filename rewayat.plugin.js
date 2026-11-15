@@ -1,18 +1,20 @@
-// Harbor eBook source plugin for رواياتعرب (riwayatarab.com).
-//
-// Verified from the live site: URL structure, pagination, chapter-list paging, and the
-// watermark lines inside chapters. Written from the rendered page text, NOT the raw HTML:
-// the CSS class names are unknown, so selectors are anchor-href based with text parsing.
-// Lines marked CHECK are the ones most likely to need adjusting after a first test run.
+// Harbor eBook source for نادي الروايات (rewayat.club).
+// Uses the site's real /library, /novel/<slug>, and /novel/<slug>/<chapter> routes.
 
-const BASE = "https://riwayatarab.com";
-const PAGE = 20; // /latest shows 20 novels per page
-const CH_PAGE = 50; // /novel/<slug>/chapters shows 50 chapters per page
+const BASE = "https://rewayat.club";
+const PAGE_SIZE = 20;
 
 async function getDoc(path) {
   const res = await harbor.http(BASE + path, { responseType: "text" });
-  if (!res.ok) throw new Error("http " + res.status + " for " + path);
+  if (!res.ok) throw new Error("HTTP " + res.status + " for " + path);
   return harbor.parseHtml(res.body);
+}
+
+function cleanPath(href) {
+  return (href || "")
+    .replace(/^https?:\/\/[^/]+/i, "")
+    .split("#")[0]
+    .split("?")[0];
 }
 
 function abs(url) {
@@ -23,222 +25,252 @@ function abs(url) {
   return BASE + "/" + url;
 }
 
-// Hrefs may be relative or absolute (https://riwayatarab.com/...). Always reduce to a path.
-function path(href) {
-  return (href || "").replace(/^https?:\/\/[^/]+/i, "").replace(/#.*$/, "");
+function imageFrom(node) {
+  if (!node) return undefined;
+  return abs(
+    node.attr("data-src") ||
+    node.attr("data-lazy-src") ||
+    node.attr("data-original") ||
+    node.attr("src")
+  );
 }
 
-// Fetch with retries so one flaky request does not wipe out a whole list.
-async function getDocRetry(p, tries = 3) {
-  let err;
-  for (let i = 0; i < tries; i++) {
-    try {
-      return await getDoc(p);
-    } catch (e) {
-      err = e;
-    }
+function pageNumber(href) {
+  const m = (href || "").match(/[?&]page=(\d+)/i);
+  return m ? Number(m[1]) : 0;
+}
+
+function maxPage(doc) {
+  let max = 1;
+  for (const a of doc.querySelectorAll("a")) {
+    const n = pageNumber(a.attr("href") || "");
+    if (n > max) max = n;
   }
-  throw err;
+  return max;
 }
 
-const STATUS = { "مستمرة": "ongoing", "مكتملة": "completed", "متوقفة": "hiatus" };
-const STATUS_RE = /(مستمرة|مكتملة|متوقفة)/;
+function novelId(href) {
+  const p = cleanPath(href);
+  const m = p.match(/^\/novel\/([^/]+)\/?$/);
+  return m ? m[1] : "";
+}
 
-const stripMarks = (s) => (s || "").replace(/[\u064B-\u065F\u0670\u0640]/g, "");
-
-// Novel cards on /latest: one <a href="/novel/<slug>"> whose text is
-// "<title> <status> <title> بقلم: <author> <synopsis> <genre> <views> <chapters> 0 آخر تحديث: <date>"
 function cardToSummary(a) {
-  const href = path(a.attr("href"));
-  if (!/^\/novel\/[^/?]+\/?$/.test(href)) return null;
-  const text = (a.text() || "").replace(/\s+/g, " ").trim();
-  if (!text) return null;
+  const id = novelId(a.attr("href"));
+  if (!id) return null;
 
-  const st = text.match(STATUS_RE);
-  let title = st ? text.slice(0, st.index) : text.split("بقلم:")[0];
-  title = title.trim();
+  const text = (a.text() || "").replace(/\s+/g, " ").trim();
+  const title = (a.attr("title") || text).trim();
   if (!title) return null;
 
-  const tail = text.match(/([\d.,]+\s?[كKM]?)\s+(\d+)\s+\d+\s+آخر تحديث/);
-  const img = a.querySelector("img");
+  const status = /مكتملة/.test(text) ? "completed" :
+    /متوقفة|متوقّفة/.test(text) ? "hiatus" :
+    /مستمرة/.test(text) ? "ongoing" : undefined;
 
   return {
-    id: href.replace(/^\/novel\//, "").replace(/\/$/, ""),
+    id,
     title,
-    cover: abs(img?.attr("src")), // CHECK: cards may carry no <img>; detail() always fills the cover
-    status: st ? STATUS[st[1]] : undefined,
-    chapters: tail ? Number(tail[2]) || undefined : undefined,
-    trendingScore: undefined,
-    isFanMade: false,
+    cover: imageFrom(a.querySelector("img")),
+    status,
+    originalLanguage: "ar",
+    isFanMade: false
   };
 }
 
-async function latestPage(page) {
-  const doc = await getDocRetry("/latest?page=" + page);
+async function libraryPage(page) {
+  const doc = await getDoc("/library" + (page > 1 ? "?page=" + page : ""));
+  const found = [];
   const seen = new Set();
-  const out = [];
   for (const a of doc.querySelectorAll("a")) {
-    const s = cardToSummary(a);
-    if (s && !seen.has(s.id)) {
-      seen.add(s.id);
-      out.push(s);
+    const item = cardToSummary(a);
+    if (item && !seen.has(item.id)) {
+      seen.add(item.id);
+      found.push(item);
     }
+  }
+  return { doc, items: found };
+}
+
+function getNovelTitle(doc, id) {
+  return (doc.querySelector("h1")?.text() || id).replace(/^رواية\s*/, "").trim();
+}
+
+function chapterTotal(text) {
+  const m = (text || "").match(/الفصول\s*\(\s*([\d,،]+)/);
+  return m ? Number(m[1].replace(/[،,]/g, "")) : undefined;
+}
+
+function chapterLinks(doc, id) {
+  const prefix = "/novel/" + id + "/";
+  const out = [];
+  const seen = new Set();
+
+  for (const a of doc.querySelectorAll("a")) {
+    const href = cleanPath(a.attr("href"));
+    if (!href.startsWith(prefix)) continue;
+    const rest = href.slice(prefix.length);
+    if (!/^\d+$/.test(rest)) continue;
+
+    const n = Number(rest);
+    if (!n || seen.has(n)) continue;
+    seen.add(n);
+    const label = (a.text() || "").replace(/\s+/g, " ").trim();
+    out.push({
+      id: href.replace(/^\//, ""),
+      number: n,
+      title: label || ("الفصل " + n)
+    });
   }
   return out;
 }
 
-// Chapter body: keep DOM order, drop the site's injected watermark / promo lines.
-function isJunk(line) {
-  const flat = line.replace(/[\s*_\-]/g, "");
-  return (
-    /حقوق\$\$.*\$\$/.test(flat) ||
-    /عالمالروايات/.test(flat) ||
-    /kol?no?vel/i.test(flat) ||
-    /مو.?قع.?ملوك/.test(flat) ||
-    /موقعكالمفضللقراءة/.test(flat) ||
-    /جميعالحقوقمحفوظة/.test(flat)
-  );
-}
-
 const plugin = {
-  id: "riwayatarab",
-  name: "رواياتعرب",
+  id: "rewayat",
+  name: "نادي الروايات",
 
-  // /latest is server-rendered. /search?sort=views is client-rendered, so it can't be scraped.
-  async popular(offset, tagId) {
-    const page = Math.floor(offset / PAGE) + 1;
-    return latestPage(page);
+  async popular(offset) {
+    const page = Math.floor(offset / PAGE_SIZE) + 1;
+    return (await libraryPage(page)).items;
   },
 
-  // /search is client-rendered (empty HTML), so there is no HTML to parse. Fallback: scan
-  // /latest pages (37 of them, ~740 novels) in small parallel batches and filter by title.
-  // Replace this once you find the JSON endpoint the search page calls (DevTools > Network).
-  async search(query, offset, tagId) {
-    if (offset > 0) return []; // all matches are returned on the first call
-    const q = stripMarks(query).toLowerCase().trim();
+  async search(query, offset) {
+    const q = (query || "").replace(/[\u064B-\u065F\u0670\u0640]/g, "").toLowerCase().trim();
     if (!q) return [];
-    const doc1 = await getDoc("/latest");
-    const last = Math.max(
-      1,
-      ...doc1
-        .querySelectorAll("a")
-        .map((a) => path(a.attr("href")).match(/^\/latest\?page=(\d+)/))
-        .filter(Boolean)
-        .map((m) => Number(m[1])),
-    );
-    const hits = [];
-    const seen = new Set();
-    for (let start = 1; start <= last; start += 6) {
+
+    const first = await libraryPage(1);
+    const last = Math.min(Math.max(maxPage(first.doc), 1), 50);
+    const all = first.items.slice();
+    const seen = new Set(all.map((x) => x.id));
+
+    for (let start = 2; start <= last; start += 5) {
       const batch = [];
-      for (let p = start; p < start + 6 && p <= last; p++) batch.push(latestPage(p).catch(() => []));
-      for (const list of await Promise.all(batch)) {
-        for (const s of list) {
-          if (!seen.has(s.id) && stripMarks(s.title).toLowerCase().includes(q)) {
-            seen.add(s.id);
-            hits.push(s);
+      for (let p = start; p < start + 5 && p <= last; p++) {
+        batch.push(libraryPage(p).catch(() => ({ items: [] })));
+      }
+      const pages = await Promise.all(batch);
+      for (const result of pages) {
+        for (const item of result.items) {
+          if (!seen.has(item.id)) {
+            seen.add(item.id);
+            all.push(item);
           }
         }
       }
     }
-    return hits;
+
+    const matches = all.filter((item) =>
+      item.title.replace(/[\u064B-\u065F\u0670\u0640]/g, "").toLowerCase().includes(q)
+    );
+    return matches.slice(offset || 0, (offset || 0) + PAGE_SIZE);
   },
 
   async detail(id) {
     const doc = await getDoc("/novel/" + id);
-    const title = doc.querySelector("h1")?.text()?.trim();
-    if (!title) return null;
-    const body = ((doc.querySelector("body") || doc).text?.() || "").replace(/\s+/g, " ");
+    const title = getNovelTitle(doc, id);
+    const body = ((doc.querySelector("body") || doc).text() || "").replace(/\s+/g, " ");
+    if (!title || title === id) return null;
 
-    const st = body.match(STATUS_RE);
-    const author = body.match(/بقلم:\s*(.+?)\s+[\d.,]+\s?[كKM]?\s*مشاهدة/)?.[1]?.trim();
-    const total = body.match(/(\d+)\s*فصل/)?.[1];
-    // CHECK: if text() collapses differently, fall back to the (truncated) meta description.
     const description =
-      body.match(/نبذة عن الرواية\s*(.+?)\s*قائمة الفصول/)?.[1]?.trim() ||
-      doc.querySelector("meta[name='description']")?.attr("content");
+      doc.querySelector("meta[name='description']")?.attr("content") ||
+      doc.querySelector("meta[property='og:description']")?.attr("content") ||
+      undefined;
 
-    const imgs = doc.querySelectorAll("img");
-    const poster = imgs.find((i) => (i.attr("alt") || "").trim() === title) || imgs[0];
     const cover =
-      abs(poster?.attr("src")) || abs(doc.querySelector("meta[property='og:image']")?.attr("content"));
+      abs(doc.querySelector("meta[property='og:image']")?.attr("content")) ||
+      imageFrom(doc.querySelector("img"));
 
-    const genres = doc
-      .querySelectorAll("a")
-      .filter((a) => path(a.attr("href")).includes("/search?category="))
-      .map((a) => a.text().trim())
+    const authorMatch = body.match(/(?:الكاتب|المؤلف|بقلم)\s*:?\s*([^،|]+?)(?:\s+(?:الفصول|التعليقات)|$)/);
+    const genres = doc.querySelectorAll("a")
+      .filter((a) => {
+        const p = a.attr("href") || "";
+        return /category|genre|tag/i.test(p);
+      })
+      .map((a) => (a.text() || "").trim())
       .filter(Boolean);
+
+    const status = /مكتملة/.test(body) ? "completed" :
+      /متوقفة|متوقّفة/.test(body) ? "hiatus" :
+      /مستمرة/.test(body) ? "ongoing" : undefined;
 
     return {
       id,
       title,
       cover,
       description,
-      status: st ? STATUS[st[1]] : undefined,
-      author: author && author !== "غير محدد" ? author : undefined, // "غير محدد" = "unspecified"
-      chapters: total ? Number(total) : undefined,
+      author: authorMatch ? authorMatch[1].trim() : undefined,
+      status,
+      chapters: chapterTotal(body),
       originalLanguage: "ar",
-      genres,
+      genres
     };
   },
 
-  // /novel/<slug>/chapters?page=N, 50 per page, ascending by default.
   async chapters(id) {
-    const base = "/novel/" + id;
-    const first = await getDocRetry(base + "/chapters");
-    const firstText = ((first.querySelector("body") || first).text?.() || "").replace(/\s+/g, " ");
-    const pageCount = Math.max(1, Number(firstText.match(/الصفحة\s*\d+\s*من\s*(\d+)/)?.[1]) || 1);
-    const total = Number(firstText.match(/(\d+)\s*فصل/)?.[1]) || 0;
+    const first = await getDoc("/novel/" + id);
+    const body = ((first.querySelector("body") || first).text() || "").replace(/\s+/g, " ");
+    const total = chapterTotal(body);
+    let pages = maxPage(first);
 
-    const docs = [first];
-    for (let p = 2; p <= pageCount; p++) {
-      try {
-        docs.push(await getDocRetry(base + "/chapters?page=" + p));
-      } catch (e) {
-        // skip a failed page; the fallback below fills any gap
+    // The novel page exposes the actual chapter URLs. Use the chapter count only
+    // to determine pagination depth; never invent missing chapter records.
+    if (pages === 1 && total) pages = Math.ceil(total / PAGE_SIZE);
+    pages = Math.min(Math.max(pages, 1), 300);
+
+    let records = chapterLinks(first, id);
+    for (let start = 2; start <= pages; start += 5) {
+      const batch = [];
+      for (let p = start; p < start + 5 && p <= pages; p++) {
+        batch.push(getDoc("/novel/" + id + "?page=" + p).catch(() => null));
+      }
+      const docs = await Promise.all(batch);
+      for (const doc of docs) {
+        if (doc) records = records.concat(chapterLinks(doc, id));
       }
     }
 
-    const byNum = new Map();
-    for (const doc of docs) {
-      for (const a of doc.querySelectorAll("a")) {
-        const href = path(a.attr("href"));
-        const m = href.match(/\/chapter\/(\d+)\/?$/);
-        if (!m) continue;
-        const n = Number(m[1]);
-        if (byNum.has(n)) continue;
-        const text = (a.text() || "").replace(/\s+/g, " ").trim();
-        const views = text.match(/\s(\d[\d.,]*\s?[كKM]?)$/)?.[1];
-        byNum.set(n, { n, id: href.replace(/^\//, ""), views });
-      }
+    const byNumber = new Map();
+    for (const item of records) {
+      if (!byNumber.has(item.number)) byNumber.set(item.number, item);
     }
 
-    // Fallback: chapter URLs are predictable (/novel/<slug>/chapter/<n>), so fill gaps / empty lists.
-    const max = Math.max(total, ...byNum.keys(), 0);
-    for (let n = 1; n <= max; n++) {
-      if (!byNum.has(n)) byNum.set(n, { n, id: "novel/" + id + "/chapter/" + n });
-    }
-
-    return [...byNum.values()]
-      .sort((x, y) => x.n - y.n)
-      .map((c, position) => ({
-        id: c.id,
-        chapter: String(c.n),
+    return [...byNumber.values()]
+      .sort((a, b) => a.number - b.number)
+      .map((item, position) => ({
+        id: item.id,
+        chapter: String(item.number),
         position,
-        title: "الفصل " + c.n,
+        title: item.title,
         pages: 0,
-        language: "ar",
-        views: c.views || undefined,
+        language: "ar"
       }));
   },
 
   async content(chapterId) {
-    const doc = await getDoc("/" + chapterId);
-    // CHECK: assumes prose is in <p>. If a chapter comes back empty, inspect the real container.
-    const scope = doc.querySelector("article") || doc.querySelector("main") || doc;
-    let lines = scope.querySelectorAll("p").map((p) => p.text().trim());
-    if (!lines.some(Boolean)) {
-      lines = (scope.text() || "").split(/\n+/).map((l) => l.trim());
+    const doc = await getDoc("/" + cleanPath(chapterId).replace(/^\//, ""));
+    const scope =
+      doc.querySelector(".chapter-content") ||
+      doc.querySelector("article") ||
+      doc.querySelector("main") ||
+      doc;
+
+    let lines = scope.querySelectorAll("p")
+      .map((p) => (p.text() || "").trim())
+      .filter(Boolean);
+
+    if (!lines.length) {
+      lines = (scope.text() || "").split(/\n+/).map((line) => line.trim()).filter(Boolean);
     }
-    return lines.filter((l) => l && !isJunk(l)).join("\n\n");
+
+    const junk = /^(إعدادات القارئ|عرض التعليقات|التعليقات|الدعم|الرئيسية|المكتبة|نادي الروايات\s*[-–].*)$/;
+    return lines.filter((line) => !junk.test(line)).join("\n\n").trim();
   },
+
+  async tags() {
+    return [
+      { id: "type:translated", name: "مترجمة", group: "النوع" },
+      { id: "type:authored", name: "مؤلفة", group: "النوع" },
+      { id: "status:ongoing", name: "مستمرة", group: "الحالة" },
+      { id: "status:completed", name: "مكتملة", group: "الحالة" }
+    ];
+  }
 };
