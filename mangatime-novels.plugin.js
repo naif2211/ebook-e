@@ -1,6 +1,6 @@
 // Harbor eBook source plugin for MangaTime Novels
 // https://mangatime.org
-// V2.2: support both singular and plural novel routes; prefer the supplied /novels catalogue.
+// V2.4: use MangaTime's tRPC novels.list API for catalogue and title search, with HTML fallback.
 
 const BASE = "https://mangatime.org";
 const PAGE_SIZE = 24;
@@ -126,6 +126,68 @@ function parseNovelCards(doc) {
   return items;
 }
 
+function trpcInput(input) {
+  const payload = { "0": { json: input, meta: { values: { cursor: ["undefined"] }, v: 1 } } };
+  if (input.cursor !== null && input.cursor !== undefined) {
+    delete payload["0"].meta.values.cursor;
+  }
+  return encodeURIComponent(JSON.stringify(payload));
+}
+
+async function apiNovelPage(cursor) {
+  const input = {
+    schemaVersion: 1,
+    limit: 12,
+    sort: "updated-desc",
+    genres: [],
+    cursor: cursor || null
+  };
+  const url = BASE + "/api/trpc/content.novels.list?batch=1&input=" + trpcInput(input);
+  const res = await harbor.http(url, { responseType: "text" });
+  if (!res || !res.ok) throw new Error("MangaTime API HTTP " + (res ? res.status : "network error"));
+  let payload;
+  try { payload = JSON.parse(res.body); }
+  catch (_) { throw new Error("تعذر قراءة استجابة قائمة روايات MangaTime API"); }
+  const envelope = Array.isArray(payload) ? payload[0] : payload;
+  const data = envelope?.result?.data?.json;
+  if (!data || !Array.isArray(data.items)) {
+    throw new Error("استجابة MangaTime API لا تحتوي على قائمة الروايات المتوقعة");
+  }
+  return data;
+}
+
+function apiItemToSummary(entry) {
+  const work = entry?.work || {};
+  const id = clean(work.slug || work.sourceId);
+  const title = clean(entry?.title || work.slug);
+  if (!id || !title) return null;
+  const coverValue = entry?.cover?.url || entry?.cover?.src || entry?.coverUrl;
+  const state = clean(entry?.completionStatus || entry?.publicationState);
+  return {
+    id,
+    title,
+    cover: abs(coverValue),
+    status: normalizeStatus(state),
+    chapters: Number(entry?.chapterCount) || undefined,
+    originalLanguage: clean(entry?.language) || "ar",
+    isFanMade: false
+  };
+}
+
+async function apiListingPage(page) {
+  let cursor = null;
+  let data = null;
+  const target = Math.max(1, Number(page) || 1);
+  for (let current = 1; current <= target; current++) {
+    data = await apiNovelPage(cursor);
+    if (current < target) {
+      cursor = data.nextCursor;
+      if (!cursor) return [];
+    }
+  }
+  return (data?.items || []).map(apiItemToSummary).filter(Boolean);
+}
+
 async function listingPage(page, tagId, searchQuery) {
   const query = new URLSearchParams(browseQuery(tagId));
   query.set("page", String(page));
@@ -230,21 +292,37 @@ const plugin = {
   name: "MangaTime Novels",
 
   async popular(offset, tagId) {
-    const page = Math.floor(Math.max(0, Number(offset) || 0) / PAGE_SIZE) + 1;
-    return listingPage(page, tagId);
+    const page = Math.floor(Math.max(0, Number(offset) || 0) / 12) + 1;
+    try {
+      return await apiListingPage(page);
+    } catch (_) {
+      return listingPage(Math.floor(Math.max(0, Number(offset) || 0) / PAGE_SIZE) + 1, tagId);
+    }
   },
 
   async search(query, offset, tagId) {
-    const page = Math.floor(Math.max(0, Number(offset) || 0) / PAGE_SIZE) + 1;
+    const page = Math.floor(Math.max(0, Number(offset) || 0) / 12) + 1;
     const q = clean(query);
-    if (!q) return listingPage(page, tagId);
-    const direct = await listingPage(page, tagId, q);
-    if (direct.length) return direct;
-
-    // Fallback for catalogue builds that ignore q: search titles on the current result page.
-    const all = await listingPage(page, tagId);
-    const needle = q.toLocaleLowerCase();
-    return all.filter((item) => item.title.toLocaleLowerCase().includes(needle));
+    if (!q) return this.popular(offset, tagId);
+    try {
+      const all = [];
+      let cursor = null;
+      const wanted = q.toLocaleLowerCase();
+      for (let i = 0; i < 20; i++) {
+        const data = await apiNovelPage(cursor);
+        all.push(...data.items.map(apiItemToSummary).filter(Boolean));
+        cursor = data.nextCursor;
+        if (!cursor || all.some((item) => item.title.toLocaleLowerCase().includes(wanted)) && all.length >= page * 12) break;
+      }
+      const matches = all.filter((item) => item.title.toLocaleLowerCase().includes(wanted));
+      return matches.slice((page - 1) * 12, page * 12);
+    } catch (_) {
+      const legacyPage = Math.floor(Math.max(0, Number(offset) || 0) / PAGE_SIZE) + 1;
+      const direct = await listingPage(legacyPage, tagId, q);
+      if (direct.length) return direct;
+      const all = await listingPage(legacyPage, tagId);
+      return all.filter((item) => item.title.toLocaleLowerCase().includes(q.toLocaleLowerCase()));
+    }
   },
 
   async detail(id) {
