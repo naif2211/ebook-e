@@ -1,6 +1,6 @@
 // Harbor eBook source plugin for MangaTime Novels
 // https://mangatime.org
-// V2.1: use the current /browse novel catalogue and /novel/<slug> detail routes.
+// V2.2: support both singular and plural novel routes; prefer the supplied /novels catalogue.
 
 const BASE = "https://mangatime.org";
 const PAGE_SIZE = 24;
@@ -39,7 +39,7 @@ function cleanPath(href) {
 }
 
 function novelIdFromHref(href) {
-  const match = cleanPath(href).match(/^\/novel\/([^/]+)$/i);
+  const match = cleanPath(href).match(/^\/novels?\/([^/]+)$/i);
   return match ? safeDecode(match[1]) : "";
 }
 
@@ -114,7 +114,7 @@ function cardToSummary(link) {
 }
 
 function parseNovelCards(doc) {
-  const links = doc.querySelectorAll("a[href*='/novel/']");
+  const links = doc.querySelectorAll("a[href*='/novel/'], a[href*='/novels/']");
   const seen = new Set();
   const items = [];
   for (const link of links) {
@@ -132,10 +132,13 @@ async function listingPage(page, tagId, searchQuery) {
   if (searchQuery) query.set("q", searchQuery);
 
   // The current MangaTime catalogue is /browse; /novels is kept as a legacy fallback.
+  const legacy = new URLSearchParams();
+  legacy.set("page", String(page));
+  if (searchQuery) legacy.set("search", searchQuery);
   const candidates = [
+    "/novels?" + legacy.toString(),
     "/browse?" + query.toString(),
-    "/browse?type=novels&page=" + page + (searchQuery ? "&q=" + encodeURIComponent(searchQuery) : ""),
-    "/novels?page=" + page + (searchQuery ? "&search=" + encodeURIComponent(searchQuery) : "")
+    "/browse?type=novels&page=" + page + (searchQuery ? "&q=" + encodeURIComponent(searchQuery) : "")
   ];
 
   let lastError;
@@ -167,13 +170,13 @@ function chapterTitle(label, number) {
 }
 
 function parseChapters(doc, id) {
-  const prefix = "/novel/" + id + "/";
+  const prefixes = ["/novel/" + id + "/", "/novels/" + id + "/"];
   const found = [];
   const seen = new Set();
 
   for (const link of doc.querySelectorAll("a[href*='/chapter-']")) {
     const path = cleanPath(link.attr("href") || "");
-    if (!path.startsWith(prefix)) continue;
+    if (!prefixes.some((prefix) => path.startsWith(prefix))) continue;
     const number = chapterNumber(path, link.text());
     if (!number || seen.has(path)) continue;
     seen.add(path);
@@ -245,7 +248,9 @@ const plugin = {
   },
 
   async detail(id) {
-    const doc = await getDoc(novelPath(id));
+    let doc;
+    try { doc = await getDoc(novelPath(id)); }
+    catch (_) { doc = await getDoc("/novels/" + encodeURIComponent(id)); }
     const root = doc.querySelector("main, article, .novel-detail, .series-detail") || doc;
     const title = clean(root.querySelector("h1")?.text() || doc.querySelector("h1")?.text() || id);
     if (!title) return null;
@@ -280,7 +285,9 @@ const plugin = {
   },
 
   async chapters(id) {
-    const doc = await getDoc(novelPath(id));
+    let doc;
+    try { doc = await getDoc(novelPath(id)); }
+    catch (_) { doc = await getDoc("/novels/" + encodeURIComponent(id)); }
     return parseChapters(doc, id);
   },
 
