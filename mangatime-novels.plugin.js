@@ -314,4 +314,3 @@ const plugin = {
   }
 };
 
-return plugin;
