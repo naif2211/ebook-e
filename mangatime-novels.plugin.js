@@ -1,6 +1,6 @@
 // Harbor eBook source plugin for MangaTime Novels
-// https://mangatime.org/novels
-// V2: uses the site's real /novel/<slug> and /novel/<slug>/chapter-N routes.
+// https://mangatime.org
+// V2.1: use the current /browse novel catalogue and /novel/<slug> detail routes.
 
 const BASE = "https://mangatime.org";
 const PAGE_SIZE = 24;
@@ -39,8 +39,7 @@ function cleanPath(href) {
 }
 
 function novelIdFromHref(href) {
-  const path = cleanPath(href);
-  const match = path.match(/^\/novel\/([^/]+)$/i);
+  const match = cleanPath(href).match(/^\/novel\/([^/]+)$/i);
   return match ? safeDecode(match[1]) : "";
 }
 
@@ -76,6 +75,7 @@ function imageFrom(node) {
 
 function browseQuery(tagId) {
   const params = new URLSearchParams();
+  params.set("type", "novel");
   if (tagId === "status:ongoing") params.set("status", "ongoing");
   if (tagId === "status:completed") params.set("status", "completed");
   if (tagId === "status:hiatus") params.set("status", "hiatus");
@@ -83,8 +83,7 @@ function browseQuery(tagId) {
   if (tagId === "sort:latest") params.set("sort", "latest");
   if (tagId === "sort:rating") params.set("sort", "rating");
   if (tagId === "sort:chapters") params.set("sort", "chapters");
-  const query = params.toString();
-  return query ? "&" + query : "";
+  return params.toString();
 }
 
 function cardToSummary(link) {
@@ -102,7 +101,7 @@ function cardToSummary(link) {
   );
   if (!title) return null;
 
-  const cardText = clean(link.text() + " " + (link.parent?.text?.() || ""));
+  const cardText = clean(link.text());
   return {
     id,
     title,
@@ -127,6 +126,32 @@ function parseNovelCards(doc) {
   return items;
 }
 
+async function listingPage(page, tagId, searchQuery) {
+  const query = new URLSearchParams(browseQuery(tagId));
+  query.set("page", String(page));
+  if (searchQuery) query.set("q", searchQuery);
+
+  // The current MangaTime catalogue is /browse; /novels is kept as a legacy fallback.
+  const candidates = [
+    "/browse?" + query.toString(),
+    "/browse?type=novels&page=" + page + (searchQuery ? "&q=" + encodeURIComponent(searchQuery) : ""),
+    "/novels?page=" + page + (searchQuery ? "&search=" + encodeURIComponent(searchQuery) : "")
+  ];
+
+  let lastError;
+  for (const path of candidates) {
+    try {
+      const doc = await getDoc(path);
+      const items = parseNovelCards(doc);
+      if (items.length) return items;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+  return [];
+}
+
 function chapterNumber(href, label) {
   const path = cleanPath(href);
   const fromPath = path.match(/\/chapter-(\d+(?:\.\d+)?)(?:-[^/]*)?$/i);
@@ -147,14 +172,11 @@ function parseChapters(doc, id) {
   const seen = new Set();
 
   for (const link of doc.querySelectorAll("a[href*='/chapter-']")) {
-    const href = link.attr("href") || "";
-    const path = cleanPath(href);
+    const path = cleanPath(link.attr("href") || "");
     if (!path.startsWith(prefix)) continue;
-
     const number = chapterNumber(path, link.text());
     if (!number || seen.has(path)) continue;
     seen.add(path);
-
     found.push({
       id: path.replace(/^\/+/, ""),
       chapter: number,
@@ -206,17 +228,20 @@ const plugin = {
 
   async popular(offset, tagId) {
     const page = Math.floor(Math.max(0, Number(offset) || 0) / PAGE_SIZE) + 1;
-    const doc = await getDoc("/novels?page=" + page + browseQuery(tagId));
-    return parseNovelCards(doc);
+    return listingPage(page, tagId);
   },
 
   async search(query, offset, tagId) {
     const page = Math.floor(Math.max(0, Number(offset) || 0) / PAGE_SIZE) + 1;
-    const filters = browseQuery(tagId);
-    const doc = await getDoc(
-      "/novels?search=" + encodeURIComponent(clean(query)) + "&page=" + page + filters
-    );
-    return parseNovelCards(doc);
+    const q = clean(query);
+    if (!q) return listingPage(page, tagId);
+    const direct = await listingPage(page, tagId, q);
+    if (direct.length) return direct;
+
+    // Fallback for catalogue builds that ignore q: search titles on the current result page.
+    const all = await listingPage(page, tagId);
+    const needle = q.toLocaleLowerCase();
+    return all.filter((item) => item.title.toLocaleLowerCase().includes(needle));
   },
 
   async detail(id) {
@@ -231,26 +256,21 @@ const plugin = {
     const metaCover = doc.querySelector("meta[property='og:image']")?.attr("content");
     const coverNode = root.querySelector(".novel-cover img, .series-cover img, img[alt], img");
     const fullText = clean(root.text());
-    const status = normalizeStatus(fullText);
     const countMatch = fullText.match(/([\d,،]+)\s*(?:فصلًا|فصلاً|فصولًا|فصل|فصول)/i);
-    const author =
-      root.querySelector("a[href*='/author/'], a[href*='/writer/'], .author")?.text();
-
+    const author = root.querySelector("a[href*='/author/'], a[href*='/writer/'], .author")?.text();
     const descriptionNodes = root.querySelectorAll(
       ".summary p, .description p, .synopsis p, [class*='description'] p"
     );
     const description = descriptionNodes.map((p) => clean(p.text())).filter(Boolean).join("\n\n");
-
     const genres = root.querySelectorAll("a[href*='/genre/'], a[href*='/tag/']")
-      .map((a) => clean(a.text()))
-      .filter(Boolean);
+      .map((a) => clean(a.text())).filter(Boolean);
 
     return {
       id,
       title,
       cover: abs(metaCover) || imageFrom(coverNode),
       description: clean(description) || clean(metaDescription) || undefined,
-      status,
+      status: normalizeStatus(fullText),
       author: clean(author) || undefined,
       chapters: countMatch ? numberFrom(countMatch[1]) : undefined,
       genres: [...new Set(genres)],
@@ -270,7 +290,6 @@ const plugin = {
     const lines = getTextBlocks(doc)
       .map((line) => line.replace(/\u00a0/g, " ").trim())
       .filter((line) => line && !/^(?:الرئيسية|الروايات|استكشف|التعليقات|اترك تعليقًا)$/i.test(line));
-
     if (!lines.length) throw new Error("لم يتم العثور على نص الفصل في صفحة MangaTime");
     return lines.join("\n\n");
   },
